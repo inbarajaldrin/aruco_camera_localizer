@@ -12,7 +12,7 @@ from rosidl_runtime_py.utilities import get_message
 from geometry_msgs.msg import PoseStamped
 from max_camera_msgs.msg import PusherInfo
 from scipy.spatial.transform import Rotation as R
-from max_camera_localizer.merged_localization import TARGET_POSES
+from aruco_camera_localizer.merged_localization import TARGET_POSES
 
 # Config
 parent_folder = "/media/max/OS/Users/maxlg/Desktop/==RISELABS/Pusher Data Batch 3/"

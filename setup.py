@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 from glob import glob
 
-package_name = 'max_camera_localizer'
+package_name = 'aruco_camera_localizer'
 
 setup(
     name=package_name,
@@ -22,7 +22,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'localize = max_camera_localizer.merged_localization:main'
+            'localize = aruco_camera_localizer.merged_localization:main'
         ],
     },
 )

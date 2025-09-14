@@ -3,10 +3,10 @@ import cv2.aruco as aruco
 import numpy as np
 from itertools import combinations
 from scipy.spatial.transform import Rotation as R
-from max_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world
-from max_camera_localizer.kalman_functions import QuaternionKalman
-from max_camera_localizer.geometric_functions import transform_points_world_to_img, slerp_quat, quat_to_rvec, complete_triangle, pick_best_candidate
-from max_camera_localizer.object_frame_definitions import define_body_frame_allen_key, define_body_frame_wrench
+from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world
+from aruco_camera_localizer.kalman_functions import QuaternionKalman
+from aruco_camera_localizer.geometric_functions import transform_points_world_to_img, slerp_quat, quat_to_rvec, complete_triangle, pick_best_candidate
+from aruco_camera_localizer.object_frame_definitions import define_body_frame_allen_key, define_body_frame_wrench
 
 def detect_markers(frame, gray, aruco_dicts, parameters):
     all_corners, all_ids = [], []

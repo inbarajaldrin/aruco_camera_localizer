@@ -5,13 +5,13 @@ import json
 import os
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
-from max_camera_localizer.camera_selection import detect_available_cameras, select_camera
-from max_camera_localizer.localizer_bridge import LocalizerBridge
-from max_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
+from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
+from aruco_camera_localizer.localizer_bridge import LocalizerBridge
+from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
 transform_points_world_to_img, transform_point_world_to_cam
-from max_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
+from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
     identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from max_camera_localizer.drawing_functions import draw_text, draw_object_lines
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines
 import threading
 import rclpy
 import argparse
@@ -270,7 +270,7 @@ def main():
     
     if not data_dir.exists():
         # Fallback to absolute path
-        data_dir = Path("/home/aaugus11/Desktop/ros2_ws/src/max_camera_localizer/data")
+        data_dir = Path("/home/aaugus11/Desktop/ros2_ws/src/aruco_camera_localizer/data")
     
     if not data_dir.exists():
         print(f"Could not find data directory at {data_dir}")

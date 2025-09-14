@@ -7,7 +7,7 @@ Usage of this package will require the UR ROS 2 driver and cv2.
 
 To install, place this repository in the src directory of your workspace. Also install the repository `max_camera_msgs` in the same location. The repository is [here](https://github.com/MaxlGao/max_camera_msgs). Then, build your workspace. 
 
-To run, first make sure a UR driver is running. Then, run `ros2 run max_camera_localizer localize` inside your workspace. 
+To run, first make sure a UR driver is running. Then, run `ros2 run aruco_camera_localizer localize` inside your workspace. 
 
 A preview window will appear, picking one camera accessible to the system. Press ESC to select this camera, or press any other key to move onto the next camera. Once you select your camera, a more detailed window will appear marking detected objects and annotating details in the top left corner. If you know your camera ID and would like to skip this process, pass the additional arg `--camera-id [YOUR_ID]`. Be warned; USB cameras can change IDs between uses.  
 
@@ -20,25 +20,17 @@ This script assumes a fixed translation from the end effector frame origin and t
 ## Example Commands:
 The following commands assume your camera is ID 8. Please remove this argument before first running the command. 
 
-Run the following to display objects and any detected (yellow and green) pushers:
+Run the following to display detected ArUco objects with wireframe visualization:
 
-`ros2 run max_camera_localizer localize --camera-id 8 --suppress-prints`
-
-Run the following to display objects without pushers:
-
-`ros2 run max_camera_localizer localize --camera-id 8 --suppress-prints --no-pushers`
-
-Run the following to display objects without pushers, while recommending pushes:
-
-`ros2 run max_camera_localizer localize --camera-id 8 --suppress-prints --no-pushers --recommend-push`
+`ros2 run aruco_camera_localizer localize --camera-id 8 --suppress-prints`
 
 ## Workspace Structure:
 
 ```
 YOUR_ROS2_WORKSPACE/
 ├── src/
-│   └── max_camera_localizer/
-│       ├── max_camera_localizer/
+│   └── aruco_camera_localizer/
+│       ├── aruco_camera_localizer/
 │       │   ├── trash/
 │       │   │   └── [unused python files]
 │       │   ├── camera_selection.py
@@ -55,10 +47,10 @@ YOUR_ROS2_WORKSPACE/
 │       ├── STL/
 │       │   ├── Allen Key.STL
 │       │   └── Wrench.STL
-│       ├── Pusher Data/
-│       │   ├── allen_key.csv
-│       │   ├── wrench.csv
-│       │   └── jenga.csv
+│       ├── data/
+│       │   ├── aruco/
+│       │   ├── models/
+│       │   └── wireframe/
 │       ├── package.xml
 │       ├── README.md
 │       ├── setup.cfg
@@ -122,10 +114,7 @@ Second is a set of initial values for EE pose, to be used if ROS2 fails to updat
 1. Camera parameters: Image frame height and width, in pixels, plus angular FOV. Distortion coefficient is included. These are specific to the camera hardware used. 
 2. `MARKER_SIZE` is the side length of the ArUco marker used for identifying Jenga blocks.
 3. `BLOCK_*` are the side measures of the Jenga blocks. 
-4. `OBJECT_DICTS` are the side lengths of the triangle formed by the pattern of three blue blobs pertaining to each object. For instance, the allen key is marked with blue tape making a triangle of side lengths 38.8, 102.6, and 129.5 mm. 
-5. `TARGET_POSES` are the goal position and orientation for all objects. 
-6. `*_range` are the HSV ranges (using cv2 standards, so 0-179 for hue, 0-255 for Sat. and Value) for blue, green, and yellow. Sensitive to lighting conditions (particularly yellow) so tune accordingly.
-7. `pusher_distance_max` is the maximum distance (base frame, meters) that a pusher can be from an object's contour while still being recorded. There is no need to recognize pushers too far away to touch an object.
+4. `TARGET_POSES` are the goal position and orientation for all objects.
 
 ### `object_frame_definitions.py`
 
@@ -148,22 +137,12 @@ The first section of this script extracts trimeshes from given STL files (alread
 Splines are made of 1000 points, as specified in `n_points`. Additional notable parameters are inside of `splprep()`, which uses an s-value of 1.
 
 # Demonstration
-The vision-based localizer, with a camera mounted on a robot's end-effector, can accurately yield the position and orientation of different objects through two primary methods. The first, as seen with the Jenga block, uses CV2's ArUco functions to give a full 6D pose in the base frame. The second, as seen with the allen key and wrench, use color detection to spot patterns of three blue blobs. 
+The vision-based localizer, with a camera mounted on a robot's end-effector, can accurately yield the position and orientation of different objects using ArUco marker detection. The system uses CV2's ArUco functions to provide full 6D pose estimation in the robot base frame.
 
-On the top of all following GIFs is a readout of robot end-effector pose, which is required to properly orient the camera in the base frame, which is in turn required to properly orient all objects that the camera sees. When objects come into view, a second readout appears, showing its estimated 6D pose. 
+The system detects multiple ArUco markers per object and selects the best detection (closest to camera) for each object. Wireframe visualization is overlaid on the camera feed to show the detected object poses.
 
-Objects needing blue blob-based detection are assumed to lie flat on the table, thus a constant 10mm z coordinate for the allen key and wrench. 
+On the top of the following GIFs is a readout of robot end-effector pose, which is required to properly orient the camera in the base frame, which is in turn required to properly orient all objects that the camera sees. When objects come into view, a second readout appears, showing its estimated 6D pose.
 
-Multiple objects may be detected at the same time. For best results, however, the working space should be kept as clean as possible. For example, there is a possibility of confusion when the allen key and wrench are placed in such a way that a second allen key pattern can be detected between the two objects.
+Multiple objects may be detected at the same time. For best results, the working space should be kept as clean as possible.
 
 ![Objects Only](./media/Localizer%20Clip%201.gif)
-
-The blue blob method was then extended to the yellow and green ranges, to allow for localization of unique point pushers. When these colors are brought close to the object, the pushers' base frame positions are estimated and compared with the contour of the object. Object contours are calculated from given CAD models, not the image. 
-
-This function is useful for capturing data from human demonstrations. In the GIF below, a human uses a pair of colored chopsticks to non-prehensibly manipulate an allen key to a goal position. Here, contour numbers are recorded for further examination.
-
-![Objects and Pusher](./media/Localizer%20Clip%202.gif)
-
-With sufficient human data, we can at last make recommendations for where on an object to push, given its relative displacement from a target. From there, this recommendation serves as a warm-start to a non-prehensile manipulation process. 
-
-![Object and Recommendation](./media/Localizer%20Clip%203.gif)

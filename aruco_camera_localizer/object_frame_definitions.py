@@ -1,6 +1,6 @@
 from scipy.spatial.transform import Rotation as R
 import numpy as np
-from max_camera_localizer.process_stl import CONTOUR_ALLEN_KEY, CONTOUR_WRENCH, CONTOUR_JENGA
+from aruco_camera_localizer.process_stl import CONTOUR_ALLEN_KEY, CONTOUR_WRENCH, CONTOUR_JENGA
 
 def define_body_frame_allen_key(p1, p2, p3, width=0.005):
     "Returns Origin, Quat, {Contact Points}"
