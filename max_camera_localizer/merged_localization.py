@@ -266,14 +266,14 @@ def main():
 
     # Load aruco_localizer data
     current_dir = Path(__file__).parent
-    source_dir = current_dir.parent.parent.parent / "src" / "max_camera_localizer"
-    data_dir = source_dir / "aruco-grasp-annotator" / "data"
+    data_dir = current_dir / "data"
     
     if not data_dir.exists():
-        data_dir = Path("/home/aaugus11/Desktop/ros2_ws/src/max_camera_localizer/aruco-grasp-annotator/data")
+        # Fallback to absolute path
+        data_dir = Path("/home/aaugus11/Desktop/ros2_ws/src/max_camera_localizer/data")
     
     if not data_dir.exists():
-        print(f"Could not find aruco-grasp-annotator data directory at {data_dir}")
+        print(f"Could not find data directory at {data_dir}")
         return
     
     # Load all model data
@@ -386,6 +386,9 @@ def main():
                     kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
 
         # After estimating pose, collect marker world positions and convert to object poses
+        # Group detections by object type and select the best one per object
+        object_detections = {}  # {model_name: [detections]}
+        
         for marker_id in kalman_filters:
             if marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
                 tvec, rvec = kalman_filters[marker_id].predict()
@@ -402,34 +405,45 @@ def main():
                 
                 model_name = marker_annotations[marker_id]['model_name']
                 
-                identified_jenga.append({
-                                    "name": f"{model_name}_{marker_id}",
-                                    "points": [object_pos_world],
-                                    "position": object_pos_world,
-                                    "quaternion": object_quat_world,
-                                    'inferred': False,
-                                })
+                # Calculate detection quality (distance from camera - closer is better)
+                distance = np.linalg.norm(object_tvec)
                 
-                # The existing draw_object_lines function will handle visualization
-                # No need for additional wireframe drawing here
+                detection = {
+                    "name": model_name,  # Use model name only, not marker ID
+                    "points": [object_pos_world],
+                    "position": object_pos_world,
+                    "quaternion": object_quat_world,
+                    'inferred': False,
+                    "distance": distance,
+                    "marker_id": marker_id,
+                    "object_tvec": object_tvec,
+                    "object_rvec": object_rvec
+                }
                 
-                if talk:
-                    print(f"[{model_name}_{marker_id}] Object WORLD Pose:")
-                    print(f"  Pos: {object_pos_world}")
-                    print(f"  Quat: {object_quat_world}")
+                # Group by object type
+                if model_name not in object_detections:
+                    object_detections[model_name] = []
+                object_detections[model_name].append(detection)
+        
+        # Select best detection per object (closest to camera)
+        for model_name, detections in object_detections.items():
+            # Sort by distance (closest first)
+            best_detection = min(detections, key=lambda x: x["distance"])
+            
+            # Remove distance and marker_id from final object
+            final_object = {k: v for k, v in best_detection.items() if k not in ["distance", "marker_id", "object_tvec", "object_rvec"]}
+            identified_jenga.append(final_object)
+            
+            if talk:
+                print(f"[{model_name}] Best detection (marker {best_detection['marker_id']}) - Distance: {best_detection['distance']:.3f}m")
+                print(f"  Pos: {best_detection['position']}")
+                print(f"  Quat: {best_detection['quaternion']}")
 
         objects = identified_jenga + detected_objects
 
-        # Wireframe Mask Visualization for ArUco Objects
+        # Wireframe Mask Visualization for ArUco Objects (only for best detections)
         for obj in identified_jenga:
-            obj_name = obj["name"]
-            if "_" in obj_name:
-                # Extract model name by removing the marker ID (last part after the last underscore)
-                # e.g., "line_brown_scaled70_23" -> "line_brown_scaled70"
-                parts = obj_name.split("_")
-                model_name = "_".join(parts[:-1])  # Remove the last part (marker ID)
-            else:
-                continue
+            model_name = obj["name"]  # Now the name is just the model name
             
             if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
                 # Get object pose in camera frame

@@ -1,0 +1,202 @@
+{
+  "export_type": "robotics_aruco_poses",
+  "version": "2.0",
+  "exported_at": "2025-09-11T23:58:48.743312",
+  "model_file": "/Users/aldrininbaraj/Documents/Projects/aruco annotate/data/models/base_scaled70.obj",
+  "total_markers": 4,
+  "markers": [
+    {
+      "aruco_dictionary": "DICT_4X4_50",
+      "aruco_id": 24,
+      "size": 0.021,
+      "border_width": 0.05,
+      "face_type": "bottom",
+      "surface_normal": [
+        0.0,
+        0.0,
+        -0.9999999899999846
+      ],
+      "pose_relative_to_cad_center": {
+        "position": {
+          "x": -0.06989339951122733,
+          "y": 0.06989339951122729,
+          "z": 0.01750000000000002
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "pose_absolute": {
+        "position": {
+          "x": -0.06989339951122733,
+          "y": 0.06989339951122729,
+          "z": 0.017500000000000075
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "cad_object_info": {
+        "center": [
+          0.0,
+          0.0,
+          -5.551115123125783e-17
+        ],
+        "dimensions": {
+          "length": 0.16100000381469726,
+          "width": 0.16100000381469726,
+          "height": 0.03500000000000003
+        }
+      }
+    },
+    {
+      "aruco_dictionary": "DICT_4X4_50",
+      "aruco_id": 25,
+      "size": 0.021,
+      "border_width": 0.05,
+      "face_type": "bottom",
+      "surface_normal": [
+        0.0,
+        0.0,
+        -0.9999999899999846
+      ],
+      "pose_relative_to_cad_center": {
+        "position": {
+          "x": 0.06989339951122733,
+          "y": 0.06989339951122729,
+          "z": 0.01750000000000002
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "pose_absolute": {
+        "position": {
+          "x": 0.06989339951122733,
+          "y": 0.06989339951122729,
+          "z": 0.017500000000000075
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "cad_object_info": {
+        "center": [
+          0.0,
+          0.0,
+          -5.551115123125783e-17
+        ],
+        "dimensions": {
+          "length": 0.16100000381469726,
+          "width": 0.16100000381469726,
+          "height": 0.03500000000000003
+        }
+      }
+    },
+    {
+      "aruco_dictionary": "DICT_4X4_50",
+      "aruco_id": 26,
+      "size": 0.021,
+      "border_width": 0.05,
+      "face_type": "bottom",
+      "surface_normal": [
+        0.0,
+        0.0,
+        -0.9999999899999846
+      ],
+      "pose_relative_to_cad_center": {
+        "position": {
+          "x": 0.06989339951122733,
+          "y": -0.06989339951122729,
+          "z": 0.01750000000000002
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "pose_absolute": {
+        "position": {
+          "x": 0.06989339951122733,
+          "y": -0.06989339951122729,
+          "z": 0.017500000000000075
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "cad_object_info": {
+        "center": [
+          0.0,
+          0.0,
+          -5.551115123125783e-17
+        ],
+        "dimensions": {
+          "length": 0.16100000381469726,
+          "width": 0.16100000381469726,
+          "height": 0.03500000000000003
+        }
+      }
+    },
+    {
+      "aruco_dictionary": "DICT_4X4_50",
+      "aruco_id": 27,
+      "size": 0.021,
+      "border_width": 0.05,
+      "face_type": "bottom",
+      "surface_normal": [
+        0.0,
+        0.0,
+        -0.9999999899999846
+      ],
+      "pose_relative_to_cad_center": {
+        "position": {
+          "x": -0.06989339951122733,
+          "y": -0.06989339951122729,
+          "z": 0.01750000000000002
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "pose_absolute": {
+        "position": {
+          "x": -0.06989339951122733,
+          "y": -0.06989339951122729,
+          "z": 0.017500000000000075
+        },
+        "rotation": {
+          "roll": 3.141592653589793,
+          "pitch": 0.0,
+          "yaw": 0.0
+        }
+      },
+      "cad_object_info": {
+        "center": [
+          0.0,
+          0.0,
+          -5.551115123125783e-17
+        ],
+        "dimensions": {
+          "length": 0.16100000381469726,
+          "width": 0.16100000381469726,
+          "height": 0.03500000000000003
+        }
+      }
+    }
+  ],
+  "description": "ArUco marker poses relative to CAD object center for robotics applications"
+}

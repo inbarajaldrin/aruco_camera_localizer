@@ -34,10 +34,6 @@ class LocalizerBridge(Node):
         # self.contact_normal_publishers = {} # { object_name: { idx: publisher } }
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
-        self.recommended_publishers = {"pusher_1_position": self.create_publisher(PointStamped, '/recommended_pusher_1/position', 10),
-                                     "pusher_2_position": self.create_publisher(PointStamped, '/recommended_pusher_2/position', 10),
-                                     "pusher_1_normal": self.create_publisher(Vector3Stamped, '/recommended_pusher_1/normal', 10),
-                                     "pusher_2_normal": self.create_publisher(Vector3Stamped, '/recommended_pusher_2/normal', 10)}
 
     def publish_image(self, frame):
         img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
@@ -116,27 +112,3 @@ class LocalizerBridge(Node):
             msg.object_index = pusher['object_index']
             msg.local_contour_index = pusher['local_contour_index']
             self.pusher_publishers[msg.pusher_name].publish(msg)
-
-    def publish_recommended_contacts(self, recommended):
-        now = self.get_clock().now().to_msg()
-        (pos_1, norm_1), (pos_2, norm_2) = recommended
-        pos_1_msg = PointStamped()
-        pos_1_msg.header.stamp = now
-        pos_1_msg.header.frame_id = "base"
-        pos_1_msg.point.x, pos_1_msg.point.y, pos_1_msg.point.z = pos_1
-        self.recommended_publishers["pusher_1_position"].publish(pos_1_msg)
-        pos_2_msg = PointStamped()
-        pos_2_msg.header.stamp = now
-        pos_2_msg.header.frame_id = "base"
-        pos_2_msg.point.x, pos_2_msg.point.y, pos_2_msg.point.z = pos_2
-        self.recommended_publishers["pusher_2_position"].publish(pos_2_msg)
-        norm_1_msg = Vector3Stamped()
-        norm_1_msg.header.stamp = now
-        norm_1_msg.header.frame_id = "base"
-        norm_1_msg.vector.x, norm_1_msg.vector.y, norm_1_msg.vector.z = norm_1
-        self.recommended_publishers["pusher_1_normal"].publish(norm_1_msg)
-        norm_2_msg = Vector3Stamped()
-        norm_2_msg.header.stamp = now
-        norm_2_msg.header.frame_id = "base"
-        norm_2_msg.vector.x, norm_2_msg.vector.y, norm_2_msg.vector.z = norm_2
-        self.recommended_publishers["pusher_2_normal"].publish(norm_2_msg)
