@@ -20,6 +20,53 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
+def detect_color_blobs_in_mask(frame, color_range, color, camera_matrix, cam_pos, cam_quat, mask, height=0.01, min_area=120, merge_threshold=0.02):
+    """Detect color blobs only within the specified mask region"""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Create color mask
+    color_mask = cv2.inRange(hsv, color_range[0], color_range[1])
+    
+    # Combine with the spatial mask (wireframe boundary)
+    combined_mask = cv2.bitwise_and(color_mask, mask)
+    
+    kernel = np.ones((15, 15), np.uint8)
+    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    world_points = []
+    image_points = []
+
+    if contours:
+        for cnt in contours:
+            M = cv2.moments(cnt)
+            area = cv2.contourArea(cnt)            
+            if area < min_area:
+                continue  # skip tiny blobs
+            if M["m00"] > 0:
+                cv2.drawContours(frame, [cnt], 0, (255, 255, 255), 1)
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+
+                # Step 1: Ray in camera frame
+                pixel = np.array([cx, cy, 1.0])
+                ray_cam = np.linalg.inv(camera_matrix) @ pixel
+
+                # Step 2: Transform ray to world frame
+                cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
+                ray_world = cam_rotation_matrix @ ray_cam
+
+                # Step 3: Intersect with ground plane (z = height)
+                if abs(ray_world[2]) > 1e-6:  # Avoid division by zero
+                    t = (height - cam_pos[2]) / ray_world[2]
+                    if t > 0:  # Only consider forward intersections
+                        world_point = cam_pos + t * ray_world
+                        world_points.append(world_point)
+                        image_points.append((cx, cy))
+                        cv2.circle(frame, (cx, cy), 5, color, -1)
+
+    return world_points, image_points
+
 def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, height=0.01, min_area=120, merge_threshold=0.02):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
