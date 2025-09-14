@@ -20,21 +20,21 @@ class QuaternionKalman:
         self.kf.measurementMatrix[0:7, 0:7] = np.eye(7)
 
         # Process noise covariance (Q). Lower Values = More Inertia
-        self.kf.processNoiseCov = np.eye(10, dtype=np.float32) * 1e-6
-        for i in range(3):   # x, y, z
-            self.kf.processNoiseCov[i, i] = 1e-4
-        for i in range(3, 7):  # quaternion x, y, z, w
+        self.kf.processNoiseCov = np.eye(10, dtype=np.float32) * 1e-5
+        for i in range(3):   # x, y, z - position uncertainty
             self.kf.processNoiseCov[i, i] = 1e-3
-        for i in range(7, 10):  # vx, vy, vz
-            self.kf.processNoiseCov[i, i] = 1e-4
+        for i in range(3, 7):  # quaternion x, y, z, w - orientation uncertainty
+            self.kf.processNoiseCov[i, i] = 1e-2
+        for i in range(7, 10):  # vx, vy, vz - velocity uncertainty
+            self.kf.processNoiseCov[i, i] = 1e-2
         
 
         # Measurement noise covariance (R). Lower Values = More Trust = You have good cameras
         self.kf.measurementNoiseCov = np.eye(7, dtype=np.float32)
-        for i in range(3):   # position
-            self.kf.measurementNoiseCov[i, i] = 1e-4
-        for i in range(3, 7):  # quaternion
-            self.kf.measurementNoiseCov[i, i] = 1e-4
+        for i in range(3):   # position - trust measurements more
+            self.kf.measurementNoiseCov[i, i] = 1e-3
+        for i in range(3, 7):  # quaternion - orientation measurements are less reliable
+            self.kf.measurementNoiseCov[i, i] = 1e-2
         
         self.kf.errorCovPost = np.eye(10, dtype=np.float32)
 
@@ -55,6 +55,12 @@ class QuaternionKalman:
         pred_quat /= np.linalg.norm(pred_quat)
         pred_rvec = quat_to_rvec(pred_quat).flatten()
         return pred_tvec, pred_rvec
+    
+    def reset(self):
+        """Reset the Kalman filter to initial state"""
+        self.kf.statePost = np.zeros((10, 1), dtype=np.float32)
+        self.kf.statePost[3:7] = np.array([[0], [0], [0], [1]], dtype=np.float32)  # Identity quaternion
+        self.kf.errorCovPost = np.eye(10, dtype=np.float32)
     
 
 class BlobKalman:

@@ -20,52 +20,6 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
-def detect_color_blobs_in_mask(frame, color_range, color, camera_matrix, cam_pos, cam_quat, mask, height=0.01, min_area=120, merge_threshold=0.02):
-    """Detect color blobs only within the specified mask region"""
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Create color mask
-    color_mask = cv2.inRange(hsv, color_range[0], color_range[1])
-    
-    # Combine with the spatial mask (wireframe boundary)
-    combined_mask = cv2.bitwise_and(color_mask, mask)
-    
-    kernel = np.ones((15, 15), np.uint8)
-    combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    world_points = []
-    image_points = []
-
-    if contours:
-        for cnt in contours:
-            M = cv2.moments(cnt)
-            area = cv2.contourArea(cnt)            
-            if area < min_area:
-                continue  # skip tiny blobs
-            if M["m00"] > 0:
-                cv2.drawContours(frame, [cnt], 0, (255, 255, 255), 1)
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-
-                # Step 1: Ray in camera frame
-                pixel = np.array([cx, cy, 1.0])
-                ray_cam = np.linalg.inv(camera_matrix) @ pixel
-
-                # Step 2: Transform ray to world frame
-                cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
-                ray_world = cam_rotation_matrix @ ray_cam
-
-                # Step 3: Intersect with ground plane (z = height)
-                if abs(ray_world[2]) > 1e-6:  # Avoid division by zero
-                    t = (height - cam_pos[2]) / ray_world[2]
-                    if t > 0:  # Only consider forward intersections
-                        world_point = cam_pos + t * ray_world
-                        world_points.append(world_point)
-                        image_points.append((cx, cy))
-                        cv2.circle(frame, (cx, cy), 5, color, -1)
-
-    return world_points, image_points
 
 def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, height=0.01, min_area=120, merge_threshold=0.02):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -127,8 +81,8 @@ def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_qu
 
 def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                   kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, talk=True):
-    max_movement = 0.05  # meters
-    hold_required = 5    # frames it must persist
+    max_movement = 0.10  # meters - increased for more tolerance
+    hold_required = 3    # frames it must persist - reduced for faster confirmation
     half_size = marker_size / 2
 
     if corners and ids:
@@ -177,16 +131,19 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     measured_quat = rvec_to_quat(rvec)
                     pred_tvec, pred_rvec = kalman.predict()
                     pred_quat = rvec_to_quat(pred_rvec)
-                    blend_factor = 0.99
-                    blended_quat = slerp_quat(pred_quat, measured_quat, blend=blend_factor)
-                    blended_rvec = quat_to_rvec(blended_quat)
-                    blended_tvec = blend_factor * tvec_flat + (1 - blend_factor) * pred_tvec
-                    kalman.correct(blended_tvec, blended_rvec)
-                    # cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, blended_rvec, blended_tvec, marker_size * 0.5)
+                    
+                    # Use Kalman filter properly - let it handle the blending internally
+                    # Only use manual blending for very noisy measurements
+                    kalman.correct(tvec_flat, rvec)
                     last_seen_frames[marker_id] = current_frame
+                    
+                    # Get the corrected state from Kalman filter
+                    corrected_tvec, corrected_rvec = kalman.predict()
+                    corrected_quat = rvec_to_quat(corrected_rvec)
+                    
                     # Convert to world frame
-                    marker_pos_world = transform_point_cam_to_world(blended_tvec, cam_pos, cam_quat)
-                    marker_quat_world = transform_orientation_cam_to_world(blended_quat, cam_quat)
+                    marker_pos_world = transform_point_cam_to_world(corrected_tvec, cam_pos, cam_quat)
+                    marker_quat_world = transform_orientation_cam_to_world(corrected_quat, cam_quat)
                     if talk:
                         print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
                         print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
@@ -200,7 +157,8 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
         if not stability["confirmed"]:
             continue
 
-        if current_frame - last_seen < 15:
+        # Ghost tracking - only predict for a few frames after last detection
+        if current_frame - last_seen < 5:  # Reduced from 15 to 5 frames
             pred_tvec, pred_rvec = kalman.predict()
             # cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, pred_rvec, pred_tvec, marker_size * 0.5)
             if not current_frame == last_seen:
@@ -212,7 +170,11 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     print(f"[{marker_id}] Ghost: t={pred_tvec}, r={pred_rvec}")
                     print(f"[{marker_id}] GHOST WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
         else:
+            # Reset confirmation after too many missed frames
             stability["confirmed"] = False
+            kalman.reset()  # Reset the Kalman filter
+            if talk:
+                print(f"[{marker_id}] Lost tracking - resetting confirmation and Kalman filter")
 
 def detect_object(p1, p2, p3, name, inferred):
     if name == "allen_key":

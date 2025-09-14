@@ -5,14 +5,12 @@ import json
 import os
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
-from scipy.spatial import cKDTree
 from max_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from max_camera_localizer.localizer_bridge import LocalizerBridge
 from max_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
 transform_points_world_to_img, transform_point_world_to_cam
-from max_camera_localizer.detection_functions import detect_markers, detect_color_blobs, detect_color_blobs_in_mask, estimate_pose, \
+from max_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
     identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from max_camera_localizer.object_frame_definitions import define_jenga_contacts, define_jenga_contour, hard_define_contour
 from max_camera_localizer.drawing_functions import draw_text, draw_object_lines
 import threading
 import rclpy
@@ -52,10 +50,6 @@ TARGET_POSES = {
 }
 
 blue_range = [np.array([100, 80, 80]), np.array([140, 255, 255])]
-green_range = [np.array([35, 80, 100]), np.array([75, 255, 255])]
-yellow_range = [np.array([15, 80, 60]), np.array([35, 255, 255])]
-
-pusher_distance_max = 0.030
 
 trackers = {}
 
@@ -246,47 +240,6 @@ def create_wireframe_mask(projected_vertices, edges, image_shape):
     
     return mask
 
-def extract_color_range_from_mask(frame, mask, min_samples=100):
-    """Extract color range from pixels within the mask"""
-    # Convert frame to HSV for better color analysis
-    hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Get pixels within the mask
-    masked_pixels = hsv_frame[mask > 0]
-    
-    print(f"DEBUG: Mask has {np.sum(mask > 0)} pixels, need {min_samples} minimum")
-    
-    if len(masked_pixels) < min_samples:
-        print(f"DEBUG: Not enough pixels in mask ({len(masked_pixels)} < {min_samples})")
-        return None, None
-    
-    # Calculate color statistics
-    h_mean, h_std = np.mean(masked_pixels[:, 0]), np.std(masked_pixels[:, 0])
-    s_mean, s_std = np.mean(masked_pixels[:, 1]), np.std(masked_pixels[:, 1])
-    v_mean, v_std = np.mean(masked_pixels[:, 2]), np.std(masked_pixels[:, 2])
-    
-    print(f"DEBUG: Color stats - H: {h_mean:.1f}±{h_std:.1f}, S: {s_mean:.1f}±{s_std:.1f}, V: {v_mean:.1f}±{v_std:.1f}")
-    
-    # Create color range with some tolerance
-    h_tolerance = max(10, h_std * 2)  # At least 10 degrees tolerance
-    s_tolerance = max(30, s_std * 2)  # At least 30 saturation tolerance
-    v_tolerance = max(30, v_std * 2)  # At least 30 value tolerance
-    
-    lower_bound = np.array([
-        max(0, h_mean - h_tolerance),
-        max(0, s_mean - s_tolerance),
-        max(0, v_mean - v_tolerance)
-    ], dtype=np.uint8)
-    
-    upper_bound = np.array([
-        min(179, h_mean + h_tolerance),
-        min(255, s_mean + s_tolerance),
-        min(255, v_mean + v_tolerance)
-    ], dtype=np.uint8)
-    
-    print(f"DEBUG: Generated HSV range - Lower: {lower_bound}, Upper: {upper_bound}")
-    
-    return lower_bound, upper_bound
 
 
 
@@ -303,24 +256,9 @@ def parse_args():
                         help="Camera device ID to use (e.g., 8). If not set, will scan and prompt.")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
-    parser.add_argument("--no-pushers", action='store_true',
-                        help="Stops detecting yellow and green pushers")
-    parser.add_argument("--recommend-push", action='store_true',
-                        help="For each object, recommend where to push")
     return parser.parse_args()
 
-def pick_closest_blob(blobs, last_position):
-    if not blobs:
-        return None
-    if last_position is None:
-        return blobs[0]
-    blobs_np = np.array(blobs)
-    distances = np.linalg.norm(blobs_np - last_position, axis=1)
-    closest_idx = np.argmin(distances)
-    return blobs[closest_idx]
 
-def match_points(new_blobs, unconfirmed_blobs, confirmed_blobs):
-    pass
 
 def main():
     args = parse_args()
@@ -412,8 +350,6 @@ def main():
             return
 
     talk = not args.suppress_prints
-    if args.recommend_push:
-        from max_camera_localizer.data_predict import predict_pusher_outputs
 
     cap = cv2.VideoCapture(cam_id)
     if not cap.isOpened():
@@ -429,9 +365,6 @@ def main():
     print("Press 'q' to quit.")
 
     detected_objects = []
-    last_pushers = {"green": None, "yellow": None}
-    unconfirmed_blobs = {"green": None, "yellow": None}
-    unconfirmed_blobs = {"green": None, "yellow": None}
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -487,49 +420,18 @@ def main():
 
         objects = identified_jenga + detected_objects
 
-        # Blue Blob Section
-        world_points, _ = detect_color_blobs(frame, blue_range, (255,0,0), CAMERA_MATRIX, cam_pos, cam_quat)
-        identified_objects = identify_objects_from_blobs(world_points, OBJECT_DICTS)
-
-        # Dynamic HSV Range Extraction and Pusher Detection
-        pushers = {"green": None, "yellow": None}
-        nearest_pushers = []
-        
-        if not args.no_pushers:
-            # Extract dynamic HSV ranges from wireframe boundaries
-            dynamic_green_range = None
-            dynamic_yellow_range = None
+        # Wireframe Mask Visualization for ArUco Objects
+        for obj in identified_jenga:
+            obj_name = obj["name"]
+            if "_" in obj_name:
+                # Extract model name by removing the marker ID (last part after the last underscore)
+                # e.g., "line_brown_scaled70_23" -> "line_brown_scaled70"
+                parts = obj_name.split("_")
+                model_name = "_".join(parts[:-1])  # Remove the last part (marker ID)
+            else:
+                continue
             
-            print(f"DEBUG: Processing {len(identified_jenga)} detected objects for HSV extraction")
-            
-            # Collect color ranges from all objects
-            all_color_ranges = []
-            
-            # For each detected object with wireframe data, extract color ranges
-            for obj in identified_jenga:
-                obj_name = obj["name"]
-                print(f"DEBUG: Processing object: {obj_name}")
-                if "_" in obj_name:
-                    # Extract model name by removing the marker ID (last part after the last underscore)
-                    # e.g., "line_brown_scaled70_23" -> "line_brown_scaled70"
-                    parts = obj_name.split("_")
-                    model_name = "_".join(parts[:-1])  # Remove the last part (marker ID)
-                    print(f"DEBUG: Model name: {model_name}")
-                else:
-                    print(f"DEBUG: Skipping object {obj_name} - no underscore found")
-                    continue
-                
-                if model_name in model_data:
-                    print(f"DEBUG: Found model data for {model_name}")
-                    if model_data[model_name]['wireframe_vertices'] is not None:
-                        print(f"DEBUG: Found wireframe data for {model_name}")
-                    else:
-                        print(f"DEBUG: No wireframe data for {model_name}")
-                        continue
-                else:
-                    print(f"DEBUG: Model {model_name} not found in model_data")
-                    continue
-                
+            if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
                 # Get object pose in camera frame
                 object_pos_world = obj["position"]
                 object_quat_world = obj["quaternion"]
@@ -556,156 +458,17 @@ def main():
                 # Create wireframe mask
                 wireframe_mask = create_wireframe_mask(projected_vertices, wireframe_edges, frame.shape)
                 
-                # Extract color range from within the wireframe
-                color_range = extract_color_range_from_mask(frame, wireframe_mask)
-                print(f"DEBUG: Color range extracted: {color_range is not None}")
-                
-                if color_range is not None:
-                    print(f"DEBUG: Color range: {color_range}")
-                    all_color_ranges.append(color_range)
-                    print(f"Dynamic HSV range extracted for {obj_name}: {color_range}")
-                else:
-                    print(f"DEBUG: No color range extracted for {obj_name}")
-                
-                # Debug: Show wireframe mask (optional)
-                if talk and wireframe_mask is not None:
+                # Show wireframe mask overlay
+                if wireframe_mask is not None:
                     # Create a colored overlay to show the wireframe mask
                     mask_overlay = np.zeros_like(frame)
                     mask_overlay[wireframe_mask > 0] = [0, 255, 0]  # Green overlay
                     frame = cv2.addWeighted(frame, 0.8, mask_overlay, 0.2, 0)
-            
-            # Combine color ranges from all objects
-            if all_color_ranges:
-                # Calculate the union of all color ranges (expand the range to include all objects)
-                all_lower = np.array([cr[0] for cr in all_color_ranges])
-                all_upper = np.array([cr[1] for cr in all_color_ranges])
-                
-                # Take the minimum lower bounds and maximum upper bounds
-                combined_lower = np.min(all_lower, axis=0)
-                combined_upper = np.max(all_upper, axis=0)
-                
-                dynamic_green_range = (combined_lower, combined_upper)
-                dynamic_yellow_range = (combined_lower, combined_upper)
-                
-                print(f"DEBUG: Combined color range from {len(all_color_ranges)} objects:")
-                print(f"  Lower: {combined_lower}")
-                print(f"  Upper: {combined_upper}")
-            else:
-                print("DEBUG: No valid color ranges extracted from any objects")
-            
-            # Use dynamic ranges if available, otherwise fall back to fixed ranges
-            current_green_range = dynamic_green_range if dynamic_green_range is not None else green_range
-            current_yellow_range = dynamic_yellow_range if dynamic_yellow_range is not None else yellow_range
-            
-            print(f"DEBUG: Using green range: {current_green_range}")
-            print(f"DEBUG: Using yellow range: {current_yellow_range}")
-            
-            # Create combined mask for all detected objects
-            combined_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-            
-            # Add each object's wireframe mask to the combined mask
-            for obj in identified_jenga:
-                obj_name = obj["name"]
-                if "_" in obj_name:
-                    parts = obj_name.split("_")
-                    model_name = "_".join(parts[:-1])  # Remove the last part (marker ID)
-                    
-                    if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
-                        # Get object pose
-                        object_pos = obj["position"]
-                        object_quat = obj["quaternion"]
-                        
-                        # Transform object pose to camera frame
-                        object_rotation_matrix = R.from_quat(object_quat).as_matrix()
-                        cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
-                        object_quat_cam = R.from_matrix(cam_rotation_matrix.T @ object_rotation_matrix).as_quat()
-                        
-                        # Convert quaternion to rotation vector for the function
-                        object_rvec_cam = R.from_quat(object_quat_cam).as_rotvec()
-                        
-                        # Transform mesh vertices to camera frame
-                        vertices_cam = transform_mesh_to_camera_frame(
-                            model_data[model_name]['wireframe_vertices'], 
-                            (object_pos, object_rvec_cam)
-                        )
-                        
-                        # Project vertices to image coordinates
-                        projected_vertices = project_vertices_to_image(vertices_cam, CAMERA_MATRIX, DIST_COEFFS)
-                        
-                        # Create wireframe mask for this object
-                        wireframe_mask = create_wireframe_mask(projected_vertices, model_data[model_name]['wireframe_edges'], frame.shape[:2])
-                        
-                        # Add to combined mask
-                        combined_mask = cv2.bitwise_or(combined_mask, wireframe_mask)
-            
-            # Now detect pushers only within the combined wireframe mask
-            # Check if we have valid color ranges before using them
-            if current_green_range is not None and current_green_range[0] is not None and current_green_range[1] is not None:
-                world_points_green, _ = detect_color_blobs_in_mask(frame, current_green_range, (0, 255, 0), CAMERA_MATRIX, cam_pos, cam_quat, combined_mask, min_area=150, merge_threshold=0)
-            else:
-                world_points_green = []
-                print("DEBUG: Skipping green pusher detection - invalid color range")
-                
-            if current_yellow_range is not None and current_yellow_range[0] is not None and current_yellow_range[1] is not None:
-                world_points_yellow, _ = detect_color_blobs_in_mask(frame, current_yellow_range, (0, 255, 255), CAMERA_MATRIX, cam_pos, cam_quat, combined_mask, min_area=150, merge_threshold=0)
-            else:
-                world_points_yellow = []
-                print("DEBUG: Skipping yellow pusher detection - invalid color range")
-            
-            print(f"DEBUG: Found {len(world_points_green)} green pushers, {len(world_points_yellow)} yellow pushers within wireframe boundaries")
 
-            if world_points_green:
-                best_green = pick_closest_blob(world_points_green, last_pushers["green"])
-                pushers["green"] = (best_green, (0, 255, 0))
-                last_pushers["green"] = best_green
+        # Blue Blob Section
+        world_points, _ = detect_color_blobs(frame, blue_range, (255,0,0), CAMERA_MATRIX, cam_pos, cam_quat)
+        identified_objects = identify_objects_from_blobs(world_points, OBJECT_DICTS)
 
-            if world_points_yellow:
-                best_yellow = pick_closest_blob(world_points_yellow, last_pushers["yellow"])
-                pushers["yellow"] = (best_yellow, (0, 255, 255))
-                last_pushers["yellow"] = best_yellow
-            
-
-            # Working block for pusher-object interaction detection
-            # For now, gets nearest contour point to each pusher
-            all_xyz = []
-            all_kappa = []
-            all_meta = []  # to keep track of which object and index a point came from
-            if objects:  # At least one pusher detected
-                for obj_idx, obj in enumerate(objects):
-                    # Skip objects that don't have contour data (like Jenga blocks)
-                    if 'contour' not in obj or obj['contour'] is None:
-                        continue
-                    xyz = obj['contour']['xyz']
-                    kappa = obj['contour']['kappa']
-                    all_xyz.extend(xyz)
-                    all_kappa.extend(kappa)
-                    all_meta.extend([(obj_idx, i) for i in range(len(xyz))])
-
-                if all_xyz:  # Only process if we have contour data
-                    all_xyz = np.array(all_xyz)
-                    all_kappa = np.array(all_kappa)
-
-                    tree = cKDTree(all_xyz)
-
-                    for color, pusher in pushers.items():
-                        if pusher is not None:
-                            pusher_pos, col = pusher
-                            distance, contour_idx = tree.query(pusher_pos)
-                            if distance > pusher_distance_max: # Must be within 30mm (accounts for differences in z)
-                                continue
-                            nearest_point = all_xyz[contour_idx]
-                            kappa_value = all_kappa[contour_idx]
-                            obj_index, local_contour_index = all_meta[contour_idx]
-                            nearest_pushers.append({
-                                'pusher_name': color,
-                                'frame_number': frame_idx,
-                                'color': col,
-                                'pusher_location': pusher_pos,
-                                'nearest_point': nearest_point,
-                                'kappa': kappa_value,
-                                'object_index': obj_index,
-                                'local_contour_index': local_contour_index
-                            })
 
         # Check for disappeared objects
         missing = False
@@ -725,60 +488,12 @@ def main():
                 if not any(obj["name"] == rec["name"] for obj in identified_objects):
                     identified_objects.append(rec)
 
-        # Bonus: For the ML test run, predict where the pushers should go
-        for obj in identified_objects+identified_jenga:
-            color = (255, 255, 0)
-            name = obj["name"]
-            if "jenga" in name:
-                name = "jenga"
-            # Skip objects that don't have contour data for pusher recommendations
-            if name in ["allen_key", "wrench", "jenga"] and 'contour' in obj and obj['contour'] is not None:
-                if args.recommend_push:
-                    posex = obj["position"][0]
-                    posey = obj["position"][1]
-                    objquat = obj["quaternion"]
-                    objeuler = R.from_quat(objquat).as_euler('xyz')
-                    oriy = objeuler[2]
-                    prediction = predict_pusher_outputs(name, posex, posey, oriy, TARGET_POSES[name])
-                    index = prediction['predicted_index']
-
-                    # Draw predicted points (of the one or two given)
-                    recommended = []
-                    for ind in index:
-                        label = f"pusher recommended @ contour {ind}"
-                        pusher_point_world = obj['contour']['xyz'][ind]
-                        pusher_point_img = transform_points_world_to_img([pusher_point_world], cam_pos, cam_quat, CAMERA_MATRIX)
-                        pusher_point_normal = obj['contour']['normals'][ind]
-
-                        (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                        cv2.rectangle(frame, (pusher_point_img[0][0] - 20, pusher_point_img[0][1] - h - 20 - 5), (pusher_point_img[0][0] + w - 20, pusher_point_img[0][1] - 20 + 5), (0, 0, 0), -1)
-                        cv2.putText(frame, label, (pusher_point_img[0][0] - 20, pusher_point_img[0][1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                        cv2.circle(frame, pusher_point_img[0], 5, color)
-
-                        recommended.append([pusher_point_world, pusher_point_normal])
-                    if len(recommended) == 1:
-                        # duplicate single pusher
-                        recommended.append(recommended[0])
-                    
-                    bridge_node.publish_recommended_contacts(recommended)
-
-                # draw target
-                target_contour = hard_define_contour(TARGET_POSES[name][0], TARGET_POSES[name][1], name)
-                # Draw low-res Contour
-                contour_xyz = target_contour["xyz"]
-                contour_img = transform_points_world_to_img(contour_xyz, cam_pos, cam_quat, CAMERA_MATRIX)
-                contour_img = np.array(contour_img)
-                contour_img.reshape((-1, 1, 2))
-                contour_img = contour_img[::20]
-                cv2.polylines(frame,[contour_img],False,color)
 
         detected_objects = identified_objects.copy()
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
-        bridge_node.publish_contacts(nearest_pushers)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
-        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, nearest_pushers)
+        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
 
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
