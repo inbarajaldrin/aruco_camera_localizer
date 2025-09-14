@@ -35,7 +35,7 @@ BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
 ARUCO_DICTS = {
     "DICT_4X4_250": aruco.DICT_4X4_250,
-    "DICT_5X5_250": aruco.DICT_5X5_250
+    # "DICT_5X5_250": aruco.DICT_5X5_250
 }
 OBJECT_DICTS = { # mm
     "allen_key": [38.8, 102.6, 129.5],
@@ -133,6 +133,9 @@ def main():
         if not ret:
             break
 
+        # Publish raw camera image
+        bridge_node.publish_image(frame)
+
         frame_idx += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -152,16 +155,17 @@ def main():
                 rquat = rvec_to_quat(rvec)
                 world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
                 world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
-                world_contacts = define_jenga_contacts(world_pos, world_rot, BLOCK_WIDTH, BLOCK_LENGTH, BLOCK_THICKNESS)
-                world_contour = define_jenga_contour(world_pos, world_rot)
+                # Removed expensive end pose calculations for Jenga blocks
+                # world_contacts = define_jenga_contacts(world_pos, world_rot, BLOCK_WIDTH, BLOCK_LENGTH, BLOCK_THICKNESS)
+                # world_contour = define_jenga_contour(world_pos, world_rot)
                 identified_jenga.append({
                                     "name": f"jenga_{marker_id}",
                                     "points": [world_pos],
                                     "position": world_pos,
                                     "quaternion": world_rot,
                                     'inferred': False,
-                                    "contacts": world_contacts,
-                                    "contour": world_contour
+                                    # "contacts": world_contacts,  # Removed
+                                    # "contour": world_contour     # Removed
                                 })
 
         objects = identified_jenga + detected_objects
@@ -195,36 +199,40 @@ def main():
             all_meta = []  # to keep track of which object and index a point came from
             if objects:  # At least one pusher detected
                 for obj_idx, obj in enumerate(objects):
+                    # Skip objects that don't have contour data (like Jenga blocks)
+                    if 'contour' not in obj or obj['contour'] is None:
+                        continue
                     xyz = obj['contour']['xyz']
                     kappa = obj['contour']['kappa']
                     all_xyz.extend(xyz)
                     all_kappa.extend(kappa)
                     all_meta.extend([(obj_idx, i) for i in range(len(xyz))])
 
-                all_xyz = np.array(all_xyz)
-                all_kappa = np.array(all_kappa)
+                if all_xyz:  # Only process if we have contour data
+                    all_xyz = np.array(all_xyz)
+                    all_kappa = np.array(all_kappa)
 
-                tree = cKDTree(all_xyz)
+                    tree = cKDTree(all_xyz)
 
-                for color, pusher in pushers.items():
-                    if pusher is not None:
-                        pusher_pos, col = pusher
-                        distance, contour_idx = tree.query(pusher_pos)
-                        if distance > pusher_distance_max: # Must be within 30mm (accounts for differences in z)
-                            continue
-                        nearest_point = all_xyz[contour_idx]
-                        kappa_value = all_kappa[contour_idx]
-                        obj_index, local_contour_index = all_meta[contour_idx]
-                        nearest_pushers.append({
-                            'pusher_name': color,
-                            'frame_number': frame_idx,
-                            'color': col,
-                            'pusher_location': pusher_pos,
-                            'nearest_point': nearest_point,
-                            'kappa': kappa_value,
-                            'object_index': obj_index,
-                            'local_contour_index': local_contour_index
-                        })
+                    for color, pusher in pushers.items():
+                        if pusher is not None:
+                            pusher_pos, col = pusher
+                            distance, contour_idx = tree.query(pusher_pos)
+                            if distance > pusher_distance_max: # Must be within 30mm (accounts for differences in z)
+                                continue
+                            nearest_point = all_xyz[contour_idx]
+                            kappa_value = all_kappa[contour_idx]
+                            obj_index, local_contour_index = all_meta[contour_idx]
+                            nearest_pushers.append({
+                                'pusher_name': color,
+                                'frame_number': frame_idx,
+                                'color': col,
+                                'pusher_location': pusher_pos,
+                                'nearest_point': nearest_point,
+                                'kappa': kappa_value,
+                                'object_index': obj_index,
+                                'local_contour_index': local_contour_index
+                            })
 
         # Check for disappeared objects
         missing = False
@@ -250,7 +258,8 @@ def main():
             name = obj["name"]
             if "jenga" in name:
                 name = "jenga"
-            if name in ["allen_key", "wrench", "jenga"]:
+            # Skip objects that don't have contour data for pusher recommendations
+            if name in ["allen_key", "wrench", "jenga"] and 'contour' in obj and obj['contour'] is not None:
                 if args.recommend_push:
                     posex = obj["position"][0]
                     posey = obj["position"][1]

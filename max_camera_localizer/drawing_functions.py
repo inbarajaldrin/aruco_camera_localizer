@@ -104,14 +104,15 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
         # for pos, ax in zip(contact_poses_img, contact_axes_img):
         #     cv2.arrowedLine(frame, ax, pos, (255, 255, 255), 2, tipLength=0.3)
 
-        # Draw low-res Contour
-        contour = obj["contour"]
-        contour_xyz = contour["xyz"]
-        contour_img = transform_points_world_to_img(contour_xyz, cam_pos, cam_quat, camera_matrix)
-        contour_img = np.array(contour_img)
-        contour_img.reshape((-1, 1, 2))
-        contour_img = contour_img[::20]
-        cv2.polylines(frame,[contour_img],False,color)
+        # Draw low-res Contour (only if contour data exists)
+        if 'contour' in obj and obj['contour'] is not None:
+            contour = obj["contour"]
+            contour_xyz = contour["xyz"]
+            contour_img = transform_points_world_to_img(contour_xyz, cam_pos, cam_quat, camera_matrix)
+            contour_img = np.array(contour_img)
+            contour_img.reshape((-1, 1, 2))
+            contour_img = contour_img[::20]
+            cv2.polylines(frame,[contour_img],False,color)
 
         # Draw label with background
         # label = f"{name}"
