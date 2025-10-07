@@ -137,3 +137,79 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
         cv2.arrowedLine(frame, pusher_point_img[0], contour_point_img[0], nearest_pusher["color"], 2, tipLength=0.3)
 
     return frame
+
+def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_objects, model_data):
+    """Draw grasp points for identified objects"""
+    for obj in identified_objects:
+        model_name = obj["name"]
+        
+        # Check if this model has grasp points data
+        if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
+            continue
+            
+        grasp_points = model_data[model_name]['grasp_points']
+        object_pos = obj["position"]
+        object_quat = obj["quaternion"]
+        
+        # Transform object rotation to rotation matrix
+        rot_matrix = R.from_quat(object_quat).as_matrix()
+        
+        # Coordinate system transformation matrix (same as wireframe)
+        coord_transform = np.array([
+            [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
+            [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
+            [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
+        ])
+        
+        # Transform each grasp point from object center frame to world frame
+        world_grasp_points = []
+        for grasp_point in grasp_points:
+            # Get grasp point position relative to object center
+            grasp_pos_local = np.array([
+                grasp_point['position']['x'],
+                grasp_point['position']['y'], 
+                grasp_point['position']['z']
+            ])
+            
+            # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
+            grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
+            
+            # Transform to world frame
+            grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
+            world_grasp_points.append(grasp_pos_world)
+        
+        # Transform grasp points to image coordinates
+        grasp_points_img = transform_points_world_to_img(world_grasp_points, cam_pos, cam_quat, camera_matrix)
+        
+        # Draw grasp points
+        for i, (grasp_point_img, grasp_point) in enumerate(zip(grasp_points_img, grasp_points)):
+            if grasp_point_img is not None:
+                # Draw grasp point as a circle (Blue color)
+                cv2.circle(frame, grasp_point_img, 8, (255, 0, 0), -1)  # Blue circle, larger size
+                
+                # Draw approach vector if available (DISABLED)
+                # if 'approach_vector' in grasp_point:
+                #     approach_vec = np.array([
+                #         grasp_point['approach_vector']['x'],
+                #         grasp_point['approach_vector']['y'],
+                #         grasp_point['approach_vector']['z']
+                #     ])
+                #     
+                #     # Apply coordinate system transformation to approach vector
+                #     approach_vec_transformed = coord_transform @ approach_vec
+                #     
+                #     # Transform approach vector to world frame
+                #     approach_vec_world = rot_matrix @ approach_vec_transformed
+                #     
+                #     # Calculate end point of approach vector (increased scale for better visibility)
+                #     approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility
+                #     approach_end_img = transform_points_world_to_img([approach_end_world], cam_pos, cam_quat, camera_matrix)
+                #     
+                #     if approach_end_img[0] is not None:
+                #         # Draw approach vector as arrow (thicker line for better visibility)
+                #         cv2.arrowedLine(frame, grasp_point_img, approach_end_img[0], (0, 255, 0), 3, tipLength=0.3)  # Green arrow
+                
+                # Draw grasp point ID (larger text for better visibility)
+                cv2.putText(frame, f"G{i+1}", 
+                           (grasp_point_img[0] + 10, grasp_point_img[1] - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)  # White text with thicker stroke

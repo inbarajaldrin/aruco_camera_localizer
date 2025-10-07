@@ -11,7 +11,7 @@ from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_o
 transform_points_world_to_img, transform_point_world_to_cam
 from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
     identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
 import threading
 import rclpy
 import argparse
@@ -155,6 +155,12 @@ def load_wireframe_data(json_file):
         data = json.load(f)
     return data['vertices'], data['edges']
 
+def load_grasp_points_data(json_file):
+    """Load grasp points data from JSON file"""
+    with open(json_file, 'r') as f:
+        data = json.load(f)
+    return data['grasp_points']
+
 def transform_mesh_to_camera_frame(vertices, object_pose):
     """Transform mesh vertices from object center frame to camera frame"""
     object_tvec, object_rvec = object_pose
@@ -292,6 +298,7 @@ def main():
     for model_name in available_models:
         aruco_annotations_file = data_dir / "aruco" / f"{model_name}_aruco.json"
         wireframe_file = data_dir / "wireframe" / f"{model_name}_wireframe.json"
+        grasp_file = data_dir / "grasp" / f"{model_name}_grasp_points_all_markers.json"
         
         try:
             aruco_annotations = load_aruco_annotations(aruco_annotations_file)
@@ -306,6 +313,15 @@ def main():
                 except Exception as e:
                     print(f"Warning: Could not load wireframe for {model_name}: {e}")
             
+            # Load grasp points data if available
+            grasp_points = None
+            if grasp_file.exists():
+                try:
+                    grasp_points = load_grasp_points_data(grasp_file)
+                    print(f"Loaded grasp points for {model_name}: {len(grasp_points)} points")
+                except Exception as e:
+                    print(f"Warning: Could not load grasp points for {model_name}: {e}")
+            
             # Create a dictionary mapping marker IDs to their annotations
             for annotation in aruco_annotations:
                 marker_id = annotation['aruco_id']
@@ -317,7 +333,8 @@ def main():
             model_data[model_name] = {
                 'aruco_annotations': aruco_annotations,
                 'wireframe_vertices': wireframe_vertices,
-                'wireframe_edges': wireframe_edges
+                'wireframe_edges': wireframe_edges,
+                'grasp_points': grasp_points
             }
             
             print(f"Loaded {model_name}: {len(aruco_annotations)} markers")
@@ -508,6 +525,7 @@ def main():
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
+        draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
 
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
