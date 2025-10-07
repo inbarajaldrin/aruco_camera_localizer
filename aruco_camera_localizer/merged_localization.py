@@ -523,6 +523,7 @@ def main():
         detected_objects = identified_objects.copy()
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
+        bridge_node.publish_grasp_points(identified_objects+identified_jenga, model_data)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
         draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)

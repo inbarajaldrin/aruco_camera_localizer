@@ -4,7 +4,7 @@ from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, P
 from std_msgs.msg import Header, ColorRGBA, Int32
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray
+from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray, GraspPoint, GraspPointArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -32,6 +32,9 @@ class LocalizerBridge(Node):
         
         # Clean approach: Single topic with proper structured data (same as max_camera_localizer)
         self.object_poses_pub = self.create_publisher(ObjectPoseArray, '/objects_poses', 10)
+        
+        # Grasp points publisher
+        self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points', 10)
         
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
@@ -94,6 +97,93 @@ class LocalizerBridge(Node):
         
         # Publish the structured message
         self.object_poses_pub.publish(msg)
+
+    def publish_grasp_points(self, identified_objects, model_data):
+        """Publish grasp points for all identified objects"""
+        now = self.get_clock().now().to_msg()
+        
+        # Create GraspPointArray message
+        msg = GraspPointArray()
+        msg.header.stamp = now
+        msg.header.frame_id = "base"
+        
+        # Process each identified object
+        for obj in identified_objects:
+            model_name = obj["name"]
+            
+            # Check if this model has grasp points data
+            if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
+                continue
+                
+            grasp_points = model_data[model_name]['grasp_points']
+            object_pos = obj["position"]
+            object_quat = obj["quaternion"]
+            
+            # Transform object rotation to rotation matrix
+            rot_matrix = R.from_quat(object_quat).as_matrix()
+            
+            # Coordinate system transformation matrix (same as wireframe)
+            coord_transform = np.array([
+                [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
+                [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
+                [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
+            ])
+            
+            # Process each grasp point
+            for grasp_point in grasp_points:
+                # Get grasp point position relative to object center
+                grasp_pos_local = np.array([
+                    grasp_point['position']['x'],
+                    grasp_point['position']['y'], 
+                    grasp_point['position']['z']
+                ])
+                
+                # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
+                grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
+                
+                # Transform to world frame
+                grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
+                
+                # Create GraspPoint message
+                grasp_msg = GraspPoint()
+                grasp_msg.header.stamp = now
+                grasp_msg.header.frame_id = "base"
+                grasp_msg.object_name = model_name
+                grasp_msg.grasp_id = grasp_point['id']
+                grasp_msg.grasp_type = grasp_point.get('type', 'unknown')
+                
+                # Set position in world frame
+                grasp_msg.position.x = float(grasp_pos_world[0])
+                grasp_msg.position.y = float(grasp_pos_world[1])
+                grasp_msg.position.z = float(grasp_pos_world[2])
+                
+                # Set approach vector (transform to world frame)
+                if 'approach_vector' in grasp_point:
+                    approach_vec_local = np.array([
+                        grasp_point['approach_vector']['x'],
+                        grasp_point['approach_vector']['y'],
+                        grasp_point['approach_vector']['z']
+                    ])
+                    
+                    # Apply coordinate system transformation to approach vector
+                    approach_vec_transformed = coord_transform @ approach_vec_local
+                    
+                    # Transform approach vector to world frame
+                    approach_vec_world = rot_matrix @ approach_vec_transformed
+                    
+                    grasp_msg.approach_vector.x = float(approach_vec_world[0])
+                    grasp_msg.approach_vector.y = float(approach_vec_world[1])
+                    grasp_msg.approach_vector.z = float(approach_vec_world[2])
+                else:
+                    # Default approach vector (upward)
+                    grasp_msg.approach_vector.x = 0.0
+                    grasp_msg.approach_vector.y = 0.0
+                    grasp_msg.approach_vector.z = 1.0
+                
+                msg.grasp_points.append(grasp_msg)
+        
+        # Publish the structured message
+        self.grasp_points_pub.publish(msg)
 
     def publish_contacts(self, pushers):
         now = self.get_clock().now().to_msg()
