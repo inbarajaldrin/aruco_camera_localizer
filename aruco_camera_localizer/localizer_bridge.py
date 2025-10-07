@@ -4,7 +4,7 @@ from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, P
 from std_msgs.msg import Header, ColorRGBA, Int32
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from max_camera_msgs.msg import PusherInfo
+from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -29,9 +29,10 @@ class LocalizerBridge(Node):
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
         self.bridge = CvBridge()
-        self.object_publishers = {}
-        # self.contact_position_publishers = {} # { object_name: { idx: publisher } }
-        # self.contact_normal_publishers = {} # { object_name: { idx: publisher } }
+        
+        # Clean approach: Single topic with proper structured data (same as max_camera_localizer)
+        self.object_poses_pub = self.create_publisher(ObjectPoseArray, '/objects_poses', 10)
+        
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
 
@@ -65,24 +66,34 @@ class LocalizerBridge(Node):
         self.cam_pose_pub.publish(msg)
 
     def publish_object_poses(self, object_data):
+        """Publish all object poses in a single structured topic (same as max_camera_localizer)"""
         now = self.get_clock().now().to_msg()
+        
+        # Create ObjectPoseArray message
+        msg = ObjectPoseArray()
+        msg.header.stamp = now
+        msg.header.frame_id = "base"
+        
+        # Add each object as an ObjectPose
         for obj in object_data:
-            name = obj["name"]
-            pos = obj["position"]
-            quat = obj["quaternion"]
-            # contacts = obj["contacts"]
-            p = Pose()
-            p.position.x, p.position.y, p.position.z = pos
-            p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w = quat
-            if name not in self.object_publishers:
-                topic = f'/object_poses/{name}'
-                self.object_publishers[name] = self.create_publisher(PoseStamped, topic, 10)
-                self.get_logger().info(f"Created publisher for object {name} -> {topic}")
-            pose_msg = PoseStamped()
-            pose_msg.header.stamp = now
-            pose_msg.header.frame_id = "base"
-            pose_msg.pose = p
-            self.object_publishers[name].publish(pose_msg)
+            object_pose = ObjectPose()
+            object_pose.header.stamp = now
+            object_pose.header.frame_id = "base"
+            object_pose.object_name = obj["name"]
+            
+            # Set pose
+            object_pose.pose.position.x = obj["position"][0]
+            object_pose.pose.position.y = obj["position"][1]
+            object_pose.pose.position.z = obj["position"][2]
+            object_pose.pose.orientation.x = obj["quaternion"][0]
+            object_pose.pose.orientation.y = obj["quaternion"][1]
+            object_pose.pose.orientation.z = obj["quaternion"][2]
+            object_pose.pose.orientation.w = obj["quaternion"][3]
+            
+            msg.objects.append(object_pose)
+        
+        # Publish the structured message
+        self.object_poses_pub.publish(msg)
 
     def publish_contacts(self, pushers):
         now = self.get_clock().now().to_msg()
