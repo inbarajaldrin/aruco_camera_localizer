@@ -24,7 +24,8 @@ setup(
     entry_points={
         'console_scripts': [
             'localize = aruco_camera_localizer.merged_localization:main',
-            'localize_yoloe = aruco_camera_localizer.merged_localization_yoloe:main'
+            'localize_yoloe = aruco_camera_localizer.merged_localization_yoloe:main',
+            'camera_publisher = aruco_camera_localizer.camera_publisher:main'
         ],
     },
 )

@@ -5,7 +5,7 @@
 # ACTIVE ROBOT SELECTION
 # ============================================================================
 # Select which robot configuration to use: 'ur5e' or 'robosort'
-active_robot: 'ur5e'
+active_robot: 'robosort'
 
 # ============================================================================
 # ROBOT CONFIGURATIONS
@@ -73,9 +73,7 @@ robots:
       #   - header.frame_id: robot base frame (e.g., "base")
       #   - pose.position: [x, y, z] in meters (base frame)
       #   - pose.orientation: quaternion [x, y, z, w] (base frame)
-      # TODO: Update this with the actual robosort topic name
-      # To find the correct topic, run: ros2 topic list | grep pose
-      tcp_pose: '/robosort/ee_pose'
+      tcp_pose: '/ee_pose'
     
     # Camera parameters
     camera:
@@ -93,8 +91,11 @@ robots:
       # Camera offset from end-effector (in EE frame)
       camera_to_ee:
         # Position offset (meters) [x, y, z]
-        # TODO: Update these values for robosort
-        position: [0.0, 0.0, 0.0]
+        # Calculated from: Camera position - EE position at [0,0,0]
+        # Camera: [-58.649, 0.124, 42.411] mm
+        # EE (gripper center): [-192.75, 0.0, 170.0] mm
+        # Offset: [134.101, 0.124, -127.589] mm = [0.134101, 0.000124, -0.127589] m
+        position: [0.134101, 0.000124, -0.127589]
         # Orientation offset (quaternion) [x, y, z, w]
         quaternion: [0.0, 0.0, 0.0, 1.0]
       
@@ -107,8 +108,10 @@ robots:
       # Default/Home position of end-effector
       ee_default:
         # Position in base frame (meters) [x, y, z]
-        # TODO: Update these values for robosort
-        position: [0.0, 0.0, 0.0]
+        # Home position at joint angles [0.0, 0.0, 0.0]
+        # FK result: [-192.75, 0.0, 170.0] mm = [-0.19275, 0.0, 0.170] m
+        position: [-0.19275, 0.0, 0.170]
         # Orientation in base frame (quaternion) [x, y, z, w]
+        # Identity orientation (pointing down)
         quaternion: [0.0, 0.0, 0.0, 1.0]
 

@@ -11,7 +11,7 @@ import threading
 from aruco_camera_localizer.config_loader import get_config
 
 class LocalizerBridge(Node):
-    def __init__(self):
+    def __init__(self, camera_topic='/camera/image_raw'):
         super().__init__('localizer_bridge')
         
         # Load configuration from YAML
@@ -29,6 +29,10 @@ class LocalizerBridge(Node):
         self.ee_quat = config.get_ee_default_quaternion()
         self.lock = threading.Lock()
         
+        # --- Latest camera frame ---
+        self.latest_frame = None
+        self.frame_lock = threading.Lock()
+        
         # Get TCP pose topic from configuration
         tcp_pose_topic = config.get_tcp_pose_topic()
         
@@ -38,6 +42,14 @@ class LocalizerBridge(Node):
             self.ee_pose_callback,
             10)
         self.get_logger().info(f"LocalizerBridge started. Subscribing to: {tcp_pose_topic}")
+        
+        # Subscribe to camera images
+        self.camera_subscription = self.create_subscription(
+            Image,
+            camera_topic,
+            self.camera_callback,
+            10)
+        self.get_logger().info(f"Subscribing to camera images on: {camera_topic}")
         
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
@@ -75,8 +87,23 @@ class LocalizerBridge(Node):
             self.ee_quat = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
                                    msg.pose.orientation.z, msg.pose.orientation.w])
 
+    def camera_callback(self, msg: Image):
+        """Callback for receiving camera frames from the camera publisher"""
+        try:
+            # Convert ROS Image message to OpenCV format
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            with self.frame_lock:
+                self.latest_frame = frame
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert camera image: {e}")
+
     def get_ee_pose(self):
         return self.ee_position, self.ee_quat
+    
+    def get_latest_frame(self):
+        """Get the latest camera frame (thread-safe)"""
+        with self.frame_lock:
+            return self.latest_frame.copy() if self.latest_frame is not None else None
 
     def get_camera_pose(self):
         with self.lock:
