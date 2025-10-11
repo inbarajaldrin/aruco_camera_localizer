@@ -1,0 +1,114 @@
+# Robot Configuration for ArUco Camera Localizer
+# This file contains robot-specific parameters for camera and TF connections
+
+# ============================================================================
+# ACTIVE ROBOT SELECTION
+# ============================================================================
+# Select which robot configuration to use: 'ur5e' or 'robosort'
+active_robot: 'ur5e'
+
+# ============================================================================
+# ROBOT CONFIGURATIONS
+# ============================================================================
+robots:
+  # --------------------------------------------------------------------------
+  # UR5e Robot Configuration
+  # --------------------------------------------------------------------------
+  ur5e:
+    # ROS Topics
+    topics:
+      # Topic to subscribe to for end-effector pose
+      # Expected message type: geometry_msgs/msg/PoseStamped
+      # Expected content:
+      #   - header.frame_id: robot base frame (e.g., "base")
+      #   - pose.position: [x, y, z] in meters (base frame)
+      #   - pose.orientation: quaternion [x, y, z, w] (base frame)
+      tcp_pose: '/tcp_pose_broadcaster/pose'
+    
+    # Camera parameters
+    camera:
+      # Camera resolution (pixels)
+      width: 1280
+      height: 720
+      
+      # Field of view (degrees)
+      horizontal_fov: 69.4
+      vertical_fov: 42.5
+    
+    # Transform (TF) configuration
+    # How the camera is connected to the robot's coordinate frames
+    transforms:
+      # Camera offset from end-effector (in EE frame)
+      # This defines where the camera is mounted relative to the robot's end-effector
+      camera_to_ee:
+        # Position offset (meters) [x, y, z]
+        position: [-0.012, -0.048, -0.01]
+        # Orientation offset (quaternion) [x, y, z, w]
+        # [0, 0, 0, 1] is identity (no rotation)
+        quaternion: [0.0, 0.0, 0.0, 1.0]
+      
+      # Calibration offsets for fine-tuning camera position (meters)
+      calibration_offset:
+        x: 0.004  # 4mm correction in x
+        y: 0.002  # 2mm correction in y
+        z: 0.0    # no z correction
+      
+      # Default/Home position of end-effector (used if ROS input unavailable)
+      # This is the fallback pose if communication with the robot fails
+      ee_default:
+        # Position in base frame (meters) [x, y, z]
+        position: [-0.144, -0.435, 0.202]
+        # Orientation in base frame (quaternion) [x, y, z, w]
+        quaternion: [0.0, 1.0, 0.0, 0.0]
+  
+  # --------------------------------------------------------------------------
+  # Robosort Robot Configuration
+  # --------------------------------------------------------------------------
+  robosort:
+    # ROS Topics
+    topics:
+      # Topic to subscribe to for end-effector pose
+      # Expected message type: geometry_msgs/msg/PoseStamped
+      # Expected content:
+      #   - header.frame_id: robot base frame (e.g., "base")
+      #   - pose.position: [x, y, z] in meters (base frame)
+      #   - pose.orientation: quaternion [x, y, z, w] (base frame)
+      # TODO: Update this with the actual robosort topic name
+      # To find the correct topic, run: ros2 topic list | grep pose
+      tcp_pose: '/robosort/ee_pose'
+    
+    # Camera parameters
+    camera:
+      # Camera resolution (pixels)
+      width: 1280
+      height: 720
+      
+      # Field of view (degrees)
+      horizontal_fov: 69.4
+      vertical_fov: 42.5
+    
+    # Transform (TF) configuration
+    # How the camera is connected to the robot's coordinate frames
+    transforms:
+      # Camera offset from end-effector (in EE frame)
+      camera_to_ee:
+        # Position offset (meters) [x, y, z]
+        # TODO: Update these values for robosort
+        position: [0.0, 0.0, 0.0]
+        # Orientation offset (quaternion) [x, y, z, w]
+        quaternion: [0.0, 0.0, 0.0, 1.0]
+      
+      # Calibration offsets for fine-tuning camera position (meters)
+      calibration_offset:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+      
+      # Default/Home position of end-effector
+      ee_default:
+        # Position in base frame (meters) [x, y, z]
+        # TODO: Update these values for robosort
+        position: [0.0, 0.0, 0.0]
+        # Orientation in base frame (quaternion) [x, y, z, w]
+        quaternion: [0.0, 0.0, 0.0, 1.0]
+

@@ -8,28 +8,36 @@ from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
+from aruco_camera_localizer.config_loader import get_config
 
 class LocalizerBridge(Node):
     def __init__(self):
         super().__init__('localizer_bridge')
+        
+        # Load configuration from YAML
+        config = get_config()
+        
         # Offset of camera from EE (in EE frame)
-        self.cam_offset_position = np.array([-0.012, -0.048, -0.01]) # meters
-        self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
+        self.cam_offset_position = config.get_camera_to_ee_position()
+        self.cam_offset_quat = config.get_camera_to_ee_quaternion()
         
         # Calibration offsets for camera position correction
-        self.calibration_offset_x = +0.004 # 5mm correction
-        self.calibration_offset_y = +0.002 # 0mm correction
+        self.calibration_offset_x, self.calibration_offset_y, _ = config.get_calibration_offset()
+        
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
-        self.ee_position = np.array([-0.144, -0.435, 0.202])
-        self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        self.ee_position = config.get_ee_default_position()
+        self.ee_quat = config.get_ee_default_quaternion()
         self.lock = threading.Lock()
+        
+        # Get TCP pose topic from configuration
+        tcp_pose_topic = config.get_tcp_pose_topic()
         
         self.subscription = self.create_subscription(
             PoseStamped,
-            '/tcp_pose_broadcaster/pose',
+            tcp_pose_topic,
             self.ee_pose_callback,
             10)
-        self.get_logger().info("TCPSubscriber node started.")
+        self.get_logger().info(f"LocalizerBridge started. Subscribing to: {tcp_pose_topic}")
         
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)

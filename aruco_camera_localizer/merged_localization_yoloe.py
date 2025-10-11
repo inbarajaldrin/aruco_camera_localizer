@@ -6,6 +6,7 @@ from scipy.spatial import cKDTree
 from sklearn.decomposition import PCA
 from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
+from aruco_camera_localizer.config_loader import get_config
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
 transform_points_world_to_img, transform_point_world_to_cam
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose, \
@@ -19,13 +20,17 @@ import json
 from ultralytics import YOLOE
 from max_camera_msgs.srv import UpdateYoloPrompts
 
-c_width = 1280 # pix
-c_hfov = 69.4 # deg
+# Load configuration from YAML
+config = get_config()
+
+c_width = config.get_camera_width()
+c_height = config.get_camera_height()
+c_hfov = config.get_camera_hfov()
+c_vfov = config.get_camera_vfov()
+
 fx = c_width / (2 * np.tan(np.deg2rad(c_hfov / 2)))
 print(f"Calculated fx as {fx}")
 
-c_height = 720 # pix
-c_vfov = 42.5 # deg
 fy = c_height / (2 * np.tan(np.deg2rad(c_vfov / 2)))
 print(f"Calculated fy as {fy}")
 
@@ -54,9 +59,7 @@ def convert_2d_orientation_to_quaternion(orientation_angle, cam_quat):
     
     return world_orientation.as_quat()
 
-CAMERA_MATRIX = np.array([[fx, 0, c_width / 2],
-                          [0, fy, c_height / 2],
-                          [0, 0, 1]], dtype=np.float32)
+CAMERA_MATRIX = config.get_camera_matrix()
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
 MARKER_SIZE = 0.019  # meters
 BLOCK_LENGTH = 0.072 # meters
