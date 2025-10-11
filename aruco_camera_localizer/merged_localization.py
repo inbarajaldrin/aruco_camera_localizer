@@ -1,9 +1,6 @@
 import cv2
 import cv2.aruco as aruco
 import numpy as np
-import json
-import os
-from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
@@ -11,7 +8,8 @@ from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_o
 transform_points_world_to_img, transform_point_world_to_cam
 from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
     identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
+from aruco_camera_localizer.object_frame_definitions import define_jenga_contacts, define_jenga_contour
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_color_dot_poses
 import threading
 import rclpy
 import argparse
@@ -30,12 +28,12 @@ CAMERA_MATRIX = np.array([[fx, 0, c_width / 2],
                           [0, fy, c_height / 2],
                           [0, 0, 1]], dtype=np.float32)
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.021  # meters - from aruco_localizer
+MARKER_SIZE = 0.019  # meters
 BLOCK_LENGTH = 0.072 # meters
 BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
 ARUCO_DICTS = {
-    "DICT_4X4_50": aruco.DICT_4X4_50,
+    "DICT_4X4_250": aruco.DICT_4X4_250,
     # "DICT_5X5_250": aruco.DICT_5X5_250
 }
 OBJECT_DICTS = { # mm
@@ -49,205 +47,30 @@ TARGET_POSES = {
     "allen_key": ([40, -600, 10], [0, 0, 0]),
 }
 
-blue_range = [np.array([100, 80, 80]), np.array([140, 255, 255])]
+# Dynamic Color Range Configuration
+# Add or remove color ranges here - the rest of the code will automatically adjust
+COLOR_RANGES = {
+    "blue": [np.array([100, 80, 80]), np.array([140, 255, 255])],
+    "red": [np.array([170, 80, 80]), np.array([180, 255, 255])],
+    "green": [np.array([35, 80, 100]), np.array([75, 255, 255])],
+    "yellow": [np.array([15, 80, 60]), np.array([35, 255, 255])],
+    # Add more colors here as needed:
+    # "purple": [np.array([130, 80, 80]), np.array([160, 255, 255])],
+    # "orange": [np.array([10, 80, 80]), np.array([25, 255, 255])],
+    # "pink": [np.array([160, 80, 80]), np.array([180, 255, 255])],
+}
+
+# Color visualization settings (BGR format for OpenCV)
+COLOR_VISUALIZATION = {
+    "blue": (255, 0, 0),      # Blue in BGR
+    "red": (0, 0, 255),       # Red in BGR  
+    "green": (0, 255, 0),     # Green in BGR
+    "yellow": (0, 255, 255),  # Yellow in BGR
+    # Add corresponding visualization colors for new ranges
+}
+
 
 trackers = {}
-
-# =============================================================================
-# ARUCO LOCALIZER FUNCTIONS
-# =============================================================================
-
-def load_aruco_annotations(json_file):
-    """Load ArUco marker annotations from JSON file"""
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    return data['markers']
-
-def get_available_models(data_dir):
-    """Get list of available models from the data directory"""
-    aruco_dir = Path(data_dir) / "aruco"
-    
-    if not aruco_dir.exists():
-        return []
-    
-    # Get all aruco files
-    aruco_files = list(aruco_dir.glob("*_aruco.json"))
-    
-    # Extract model names (remove _aruco.json suffix)
-    available_models = {f.stem.replace("_aruco", "") for f in aruco_files}
-    return sorted(list(available_models))
-
-def estimate_object_pose_from_marker(marker_pose, aruco_annotation):
-    """
-    Estimate the 6D pose of the object center from ArUco marker pose.
-    This is the same function from object_pose_estimator_kalman.py
-    """
-    # Get marker position and rotation
-    marker_tvec, marker_rvec = marker_pose
-    
-    # Convert marker rotation vector to rotation matrix
-    marker_rotation_matrix, _ = cv2.Rodrigues(marker_rvec)
-    
-    # Get the marker's pose relative to CAD center from annotation
-    marker_relative_pose = aruco_annotation['pose_relative_to_cad_center']
-    
-    # Coordinate system transformation matrix
-    coord_transform = np.array([
-        [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-        [0,   1,  0],  # Y-axis
-        [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-    ])
-    
-    # Get marker position relative to object center (in object frame)
-    marker_pos_in_object = np.array([
-        marker_relative_pose['position']['x'],
-        marker_relative_pose['position']['y'], 
-        marker_relative_pose['position']['z']
-    ])
-    
-    # Apply scaling and coordinate transformation
-    marker_pos_in_object = coord_transform @ (marker_pos_in_object * 1.25)
-    
-    # Get marker orientation relative to object center
-    marker_rot = marker_relative_pose['rotation']
-    marker_rotation_in_object = euler_to_rotation_matrix(
-        marker_rot['roll'], marker_rot['pitch'], marker_rot['yaw']
-    )
-    
-    # Apply coordinate system transformation to the rotation matrix
-    marker_rotation_in_object = coord_transform @ marker_rotation_in_object @ coord_transform.T
-    
-    # Calculate object center position in camera frame
-    object_origin_in_marker_frame = marker_rotation_in_object.T @ (-marker_pos_in_object)
-    object_tvec = marker_tvec.flatten() + marker_rotation_matrix @ object_origin_in_marker_frame
-    
-    # Calculate object center orientation in camera frame
-    object_rotation_matrix = marker_rotation_matrix @ marker_rotation_in_object.T
-    
-    # Convert back to rotation vector
-    object_rvec, _ = cv2.Rodrigues(object_rotation_matrix)
-    
-    return object_tvec, object_rvec
-
-def euler_to_rotation_matrix(roll, pitch, yaw):
-    """Convert Euler angles (roll, pitch, yaw) to rotation matrix"""
-    r, p, y = roll, pitch, yaw
-    
-    # Create rotation matrices for each axis
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(r), -np.sin(r)],
-                   [0, np.sin(r), np.cos(r)]])
-    
-    Ry = np.array([[np.cos(p), 0, np.sin(p)],
-                   [0, 1, 0],
-                   [-np.sin(p), 0, np.cos(p)]])
-    
-    Rz = np.array([[np.cos(y), -np.sin(y), 0],
-                   [np.sin(y), np.cos(y), 0],
-                   [0, 0, 1]])
-    
-    # Combine rotations (order: Rz * Ry * Rx)
-    return Rz @ Ry @ Rx
-
-def load_wireframe_data(json_file):
-    """Load wireframe data from JSON file"""
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    return data['vertices'], data['edges']
-
-def load_grasp_points_data(json_file):
-    """Load grasp points data from JSON file"""
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    return data['grasp_points']
-
-def transform_mesh_to_camera_frame(vertices, object_pose):
-    """Transform mesh vertices from object center frame to camera frame"""
-    object_tvec, object_rvec = object_pose
-    
-    # Convert rotation vector to rotation matrix
-    rotation_matrix, _ = cv2.Rodrigues(object_rvec)
-    
-    # Coordinate system transformation matrix
-    coord_transform = np.array([
-        [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-        [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-        [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-    ])
-    
-    # Transform vertices from object center frame to camera frame
-    transformed_vertices = []
-    for vertex in vertices:
-        # Apply coordinate system transformation and scaling
-        vertex_transformed = coord_transform @ (np.array(vertex) * 1.25)
-        
-        # Transform from object frame to camera frame
-        vertex_cam = rotation_matrix @ vertex_transformed + object_tvec
-        transformed_vertices.append(vertex_cam)
-    
-    return np.array(transformed_vertices)
-
-def project_vertices_to_image(vertices, camera_matrix, dist_coeffs):
-    """Project 3D vertices to 2D image coordinates"""
-    if len(vertices) == 0:
-        return np.array([])
-    
-    # Project points to image plane
-    projected_points, _ = cv2.projectPoints(
-        vertices.astype(np.float32), 
-        np.zeros((3, 1)),  # No rotation (already in camera frame)
-        np.zeros((3, 1)),  # No translation (already in camera frame)
-        camera_matrix, 
-        dist_coeffs
-    )
-    
-    return projected_points.reshape(-1, 2).astype(np.int32)
-
-def create_wireframe_mask(projected_vertices, edges, image_shape):
-    """Create a binary mask of the wireframe boundary"""
-    mask = np.zeros(image_shape[:2], dtype=np.uint8)
-    
-    if len(projected_vertices) == 0:
-        return mask
-    
-    # Filter out vertices that are outside the image bounds
-    height, width = image_shape[:2]
-    valid_vertices = []
-    valid_indices = []
-    
-    for i, vertex in enumerate(projected_vertices):
-        x, y = vertex
-        if 0 <= x < width and 0 <= y < height:
-            valid_vertices.append(vertex)
-            valid_indices.append(i)
-    
-    if len(valid_vertices) == 0:
-        return mask
-    
-    # Create mapping from original indices to valid indices
-    index_map = {orig_idx: new_idx for new_idx, orig_idx in enumerate(valid_indices)}
-    
-    # Draw wireframe edges on mask
-    for edge in edges:
-        if len(edge) >= 2:
-            start_idx, end_idx = edge[0], edge[1]
-            if start_idx in index_map and end_idx in index_map:
-                start_point = tuple(valid_vertices[index_map[start_idx]])
-                end_point = tuple(valid_vertices[index_map[end_idx]])
-                cv2.line(mask, start_point, end_point, 255, 2)
-    
-    # Fill the wireframe boundary to create a solid mask
-    # Find contours and fill them
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        # Fill the largest contour (main object boundary)
-        largest_contour = max(contours, key=cv2.contourArea)
-        cv2.fillPoly(mask, [largest_contour], 255)
-    
-    return mask
-
-
-
 
 def start_ros_node():
     rclpy.init()
@@ -264,92 +87,22 @@ def parse_args():
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     return parser.parse_args()
 
+def pick_closest_blob(blobs, last_position):
+    if not blobs:
+        return None
+    if last_position is None:
+        return blobs[0]
+    blobs_np = np.array(blobs)
+    distances = np.linalg.norm(blobs_np - last_position, axis=1)
+    closest_idx = np.argmin(distances)
+    return blobs[closest_idx]
 
+def match_points(new_blobs, unconfirmed_blobs, confirmed_blobs):
+    pass
 
 def main():
     args = parse_args()
     bridge_node = start_ros_node()
-
-    # Load aruco_localizer data
-    current_dir = Path(__file__).parent
-    data_dir = current_dir / "data"
-    
-    if not data_dir.exists():
-        # Fallback to absolute path
-        data_dir = Path("/home/aaugus11/Desktop/ros2_ws/src/aruco_camera_localizer/data")
-    
-    if not data_dir.exists():
-        print(f"Could not find data directory at {data_dir}")
-        return
-    
-    # Load all model data
-    available_models = get_available_models(data_dir)
-    if not available_models:
-        print(f"No models found in data directory: {data_dir}")
-        return
-    
-    print(f"Available models: {available_models}")
-    
-    model_data = {}
-    marker_annotations = {}
-    
-    print(f"DEBUG: About to load models: {available_models}")
-    
-    for model_name in available_models:
-        aruco_annotations_file = data_dir / "aruco" / f"{model_name}_aruco.json"
-        wireframe_file = data_dir / "wireframe" / f"{model_name}_wireframe.json"
-        grasp_file = data_dir / "grasp" / f"{model_name}_grasp_points_all_markers.json"
-        
-        try:
-            aruco_annotations = load_aruco_annotations(aruco_annotations_file)
-            
-            # Load wireframe data if available
-            wireframe_vertices = None
-            wireframe_edges = None
-            if wireframe_file.exists():
-                try:
-                    wireframe_vertices, wireframe_edges = load_wireframe_data(wireframe_file)
-                    print(f"Loaded wireframe for {model_name}: {len(wireframe_vertices)} vertices, {len(wireframe_edges)} edges")
-                except Exception as e:
-                    print(f"Warning: Could not load wireframe for {model_name}: {e}")
-            
-            # Load grasp points data if available
-            grasp_points = None
-            if grasp_file.exists():
-                try:
-                    grasp_points = load_grasp_points_data(grasp_file)
-                    print(f"Loaded grasp points for {model_name}: {len(grasp_points)} points")
-                except Exception as e:
-                    print(f"Warning: Could not load grasp points for {model_name}: {e}")
-            
-            # Create a dictionary mapping marker IDs to their annotations
-            for annotation in aruco_annotations:
-                marker_id = annotation['aruco_id']
-                marker_annotations[marker_id] = {
-                    'annotation': annotation,
-                    'model_name': model_name
-                }
-            
-            model_data[model_name] = {
-                'aruco_annotations': aruco_annotations,
-                'wireframe_vertices': wireframe_vertices,
-                'wireframe_edges': wireframe_edges,
-                'grasp_points': grasp_points
-            }
-            
-            print(f"Loaded {model_name}: {len(aruco_annotations)} markers")
-            print(f"DEBUG: Added {model_name} to model_data")
-        except Exception as e:
-            print(f"Error loading model {model_name}: {e}")
-            continue
-    
-    if not model_data:
-        print("No model data loaded successfully")
-        return
-    
-    print(f"Total markers to track: {len(marker_annotations)}")
-    print(f"DEBUG: Final model_data keys: {list(model_data.keys())}")
-    print(f"Marker IDs: {sorted(marker_annotations.keys())}")
 
     kalman_filters = {}
     marker_stabilities = {}
@@ -397,109 +150,55 @@ def main():
         ee_pos, ee_quat = bridge_node.get_ee_pose()
         cam_pos, cam_quat = bridge_node.get_camera_pose()
 
-        # Aruco Section - Now using aruco_localizer objects
+        # Aruco Section
         corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
         estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
                     kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
 
-        # After estimating pose, collect marker world positions and convert to object poses
-        # Group detections by object type and select the best one per object
-        object_detections = {}  # {model_name: [detections]}
-        
+        # After estimating pose, collect marker world positions
         for marker_id in kalman_filters:
-            if marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
+            if marker_stabilities[marker_id]["confirmed"]:
                 tvec, rvec = kalman_filters[marker_id].predict()
                 rquat = rvec_to_quat(rvec)
-                
-                # Get object pose from marker pose using correct estimation
-                marker_annotation = marker_annotations[marker_id]['annotation']
-                object_tvec, object_rvec = estimate_object_pose_from_marker((tvec, rvec), marker_annotation)
-                object_quat = rvec_to_quat(object_rvec)
-                
-                # Convert object pose to world frame
-                object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
-                object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
-                
-                model_name = marker_annotations[marker_id]['model_name']
-                
-                # Calculate detection quality (distance from camera - closer is better)
-                distance = np.linalg.norm(object_tvec)
-                
-                detection = {
-                    "name": model_name,  # Use model name only, not marker ID
-                    "points": [object_pos_world],
-                    "position": object_pos_world,
-                    "quaternion": object_quat_world,
-                    'inferred': False,
-                    "distance": distance,
-                    "marker_id": marker_id,
-                    "object_tvec": object_tvec,
-                    "object_rvec": object_rvec
-                }
-                
-                # Group by object type
-                if model_name not in object_detections:
-                    object_detections[model_name] = []
-                object_detections[model_name].append(detection)
-        
-        # Select best detection per object (closest to camera)
-        for model_name, detections in object_detections.items():
-            # Sort by distance (closest first)
-            best_detection = min(detections, key=lambda x: x["distance"])
-            
-            # Remove distance and marker_id from final object
-            final_object = {k: v for k, v in best_detection.items() if k not in ["distance", "marker_id", "object_tvec", "object_rvec"]}
-            identified_jenga.append(final_object)
-            
-            if talk:
-                print(f"[{model_name}] Best detection (marker {best_detection['marker_id']}) - Distance: {best_detection['distance']:.3f}m")
-                print(f"  Pos: {best_detection['position']}")
-                print(f"  Quat: {best_detection['quaternion']}")
+                world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
+                world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
+                # Removed expensive end pose calculations for Jenga blocks
+                # world_contacts = define_jenga_contacts(world_pos, world_rot, BLOCK_WIDTH, BLOCK_LENGTH, BLOCK_THICKNESS)
+                # world_contour = define_jenga_contour(world_pos, world_rot)
+                identified_jenga.append({
+                                    "name": f"jenga_{marker_id}",
+                                    "points": [world_pos],
+                                    "position": world_pos,
+                                    "quaternion": world_rot,
+                                    'inferred': False,
+                                    # "contacts": world_contacts,  # Removed
+                                    # "contour": world_contour     # Removed
+                                })
 
         objects = identified_jenga + detected_objects
 
-        # Wireframe Mask Visualization for ArUco Objects (only for best detections)
-        for obj in identified_jenga:
-            model_name = obj["name"]  # Now the name is just the model name
-            
-            if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
-                # Get object pose in camera frame
-                object_pos_world = obj["position"]
-                object_quat_world = obj["quaternion"]
-                
-                # Transform to camera frame
-                object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
-                # For quaternion, we need to transform from world to camera frame
-                cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
-                object_rotation_matrix = R.from_quat(object_quat_world).as_matrix()
-                object_rotation_cam = cam_rotation_matrix.T @ object_rotation_matrix
-                object_quat_cam = R.from_matrix(object_rotation_cam).as_quat()
-                
-                # Convert quaternion to rotation vector
-                object_rotation_matrix = R.from_quat(object_quat_cam).as_matrix()
-                object_rvec, _ = cv2.Rodrigues(object_rotation_matrix)
-                
-                # Transform wireframe to camera frame
-                wireframe_vertices = model_data[model_name]['wireframe_vertices']
-                wireframe_edges = model_data[model_name]['wireframe_edges']
-                
-                transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
-                projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS)
-                
-                # Create wireframe mask
-                wireframe_mask = create_wireframe_mask(projected_vertices, wireframe_edges, frame.shape)
-                
-                # Show wireframe mask overlay
-                if wireframe_mask is not None:
-                    # Create a colored overlay to show the wireframe mask
-                    mask_overlay = np.zeros_like(frame)
-                    mask_overlay[wireframe_mask > 0] = [0, 255, 0]  # Green overlay
-                    frame = cv2.addWeighted(frame, 0.8, mask_overlay, 0.2, 0)
+        # Dynamic Color Detection Section
+        detected_color_points = {}
+        all_target_points = []
+        
+        # Detect all configured colors dynamically
+        for color_name, color_range in COLOR_RANGES.items():
+            color_bgr = COLOR_VISUALIZATION.get(color_name, (255, 255, 255))
+            world_points, _ = detect_color_blobs(frame, color_range, color_bgr, CAMERA_MATRIX, cam_pos, cam_quat)
+            detected_color_points[color_name] = world_points
+            all_target_points.extend(world_points)
+        
+        # Object identification (only for blue points for now)
+        if "blue" in detected_color_points:
+            identified_objects = identify_objects_from_blobs(detected_color_points["blue"], OBJECT_DICTS)
+        else:
+            identified_objects = []
+        
+        # Publish all target poses dynamically
+        bridge_node.publish_target_poses(detected_color_points)
 
-        # Blue Blob Section
-        world_points, _ = detect_color_blobs(frame, blue_range, (255,0,0), CAMERA_MATRIX, cam_pos, cam_quat)
-        identified_objects = identify_objects_from_blobs(world_points, OBJECT_DICTS)
-
+        # Pusher section removed
+        nearest_pushers = []
 
         # Check for disappeared objects
         missing = False
@@ -509,7 +208,8 @@ def main():
         
         # Attempt recovery if any objects are missing
         if missing: 
-            recovered_objects = attempt_recovery_for_missing_objects(detected_objects, world_points, known_triangles=OBJECT_DICTS)
+            blue_points = detected_color_points.get("blue", [])
+            recovered_objects = attempt_recovery_for_missing_objects(detected_objects, blue_points, known_triangles=OBJECT_DICTS)
         else:
             recovered_objects = None
 
@@ -519,14 +219,15 @@ def main():
                 if not any(obj["name"] == rec["name"] for obj in identified_objects):
                     identified_objects.append(rec)
 
+        # ML prediction section removed
 
         detected_objects = identified_objects.copy()
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
-        bridge_node.publish_grasp_points(identified_objects+identified_jenga, model_data)
+        bridge_node.publish_contacts(nearest_pushers)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
-        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
-        draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
+        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, nearest_pushers)
+        draw_color_dot_poses(frame, CAMERA_MATRIX, cam_pos, cam_quat, detected_color_points, COLOR_VISUALIZATION)
 
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):

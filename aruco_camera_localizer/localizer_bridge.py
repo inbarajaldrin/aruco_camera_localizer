@@ -1,10 +1,10 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, Point
-from std_msgs.msg import Header, ColorRGBA, Int32
+from std_msgs.msg import Header, ColorRGBA, Int32, String
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
-from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray, GraspPoint, GraspPointArray
+from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -15,33 +15,51 @@ class LocalizerBridge(Node):
         # Offset of camera from EE (in EE frame)
         self.cam_offset_position = np.array([-0.012, -0.048, -0.01]) # meters
         self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
+        
+        # Calibration offsets for camera position correction
+        self.calibration_offset_x = +0.004 # 5mm correction
+        self.calibration_offset_y = +0.002 # 0mm correction
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
         self.ee_position = np.array([-0.144, -0.435, 0.202])
         self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
         self.lock = threading.Lock()
+        
         self.subscription = self.create_subscription(
             PoseStamped,
             '/tcp_pose_broadcaster/pose',
             self.ee_pose_callback,
             10)
         self.get_logger().info("TCPSubscriber node started.")
+        
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
+        self.annotated_image_publisher = self.create_publisher(Image, 'intel_camera_annotated', 10)
         self.bridge = CvBridge()
         
-        # Clean approach: Single topic with proper structured data (same as max_camera_localizer)
+        # Clean approach: Single topic with proper structured data
         self.object_poses_pub = self.create_publisher(ObjectPoseArray, '/objects_poses', 10)
         
-        # Grasp points publisher
-        self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points', 10)
+        # Blue dot targets publisher
+        self.targets_poses_pub = self.create_publisher(ObjectPoseArray, '/targets_poses', 10)
         
+        # Pusher publishers
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
+        self.recommended_publishers = {"pusher_1_position": self.create_publisher(PointStamped, '/recommended_pusher_1/position', 10),
+                                     "pusher_2_position": self.create_publisher(PointStamped, '/recommended_pusher_2/position', 10),
+                                     "pusher_1_normal": self.create_publisher(Vector3Stamped, '/recommended_pusher_1/normal', 10),
+                                     "pusher_2_normal": self.create_publisher(Vector3Stamped, '/recommended_pusher_2/normal', 10)}
+        
 
     def publish_image(self, frame):
         img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
         self.image_publisher.publish(img_msg)
+
+    def publish_annotated_image(self, frame):
+        """Publish the annotated/processed frame that's displayed in OpenCV window"""
+        img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
+        self.annotated_image_publisher.publish(img_msg)
 
     def ee_pose_callback(self, msg: PoseStamped):
         with self.lock:
@@ -57,8 +75,21 @@ class LocalizerBridge(Node):
             r_ee = R.from_quat(self.ee_quat)
             r_cam_offset = R.from_quat(self.cam_offset_quat)
             cam_pos_world = self.ee_position + r_ee.apply(self.cam_offset_position)
+            
+            # Apply calibration offsets in the camera frame
+            calibration_offset = np.array([self.calibration_offset_x, self.calibration_offset_y, 0.0])
+            cam_pos_world += r_ee.apply(calibration_offset)
+            
             cam_quat_world = (r_ee * r_cam_offset).as_quat()
         return cam_pos_world, cam_quat_world
+
+    def canonicalize_euler(self, orientation):
+        """Forces euler angles near the form (-180, 0, yaw') to take the equivalent form (0, 180, yaw)"""
+        roll, pitch, yaw = orientation
+        if abs(pitch) < 1 and abs(abs(roll) - 180) < 1:
+            return (0.0, 180.0, (yaw % 360)-180)
+        else:
+            return orientation
 
     def publish_camera_pose(self, pos, quat):
         msg = PoseStamped()
@@ -69,7 +100,7 @@ class LocalizerBridge(Node):
         self.cam_pose_pub.publish(msg)
 
     def publish_object_poses(self, object_data):
-        """Publish all object poses in a single structured topic (same as max_camera_localizer)"""
+        """Publish all object poses in a single structured topic"""
         now = self.get_clock().now().to_msg()
         
         # Create ObjectPoseArray message
@@ -93,100 +124,65 @@ class LocalizerBridge(Node):
             object_pose.pose.orientation.z = obj["quaternion"][2]
             object_pose.pose.orientation.w = obj["quaternion"][3]
             
+            # Calculate and set RPY angles from quaternion
+            quat = obj["quaternion"]
+            rot = R.from_quat([quat[0], quat[1], quat[2], quat[3]])
+            rpy = rot.as_euler('xyz', degrees=True)  # Convert to degrees
+            
+            # Apply canonicalization to match OpenCV display values
+            rpy = self.canonicalize_euler(rpy)
+            
+            object_pose.roll = rpy[0]
+            object_pose.pitch = rpy[1]
+            object_pose.yaw = rpy[2]
+            
             msg.objects.append(object_pose)
         
         # Publish the structured message
         self.object_poses_pub.publish(msg)
 
-    def publish_grasp_points(self, identified_objects, model_data):
-        """Publish grasp points for all identified objects"""
+    def publish_target_poses(self, detected_color_points):
+        """Publish all detected color dot poses to /targets_poses topic"""
         now = self.get_clock().now().to_msg()
         
-        # Create GraspPointArray message
-        msg = GraspPointArray()
+        # Create ObjectPoseArray message for targets
+        msg = ObjectPoseArray()
         msg.header.stamp = now
         msg.header.frame_id = "base"
         
-        # Process each identified object
-        for obj in identified_objects:
-            model_name = obj["name"]
-            
-            # Check if this model has grasp points data
-            if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
-                continue
+        # Add all detected color points as target poses
+        for color_name, world_points in detected_color_points.items():
+            for i, point in enumerate(world_points):
+                target_pose = ObjectPose()
+                target_pose.header.stamp = now
+                target_pose.header.frame_id = "base"
+                target_pose.object_name = f"{color_name}_dot_{i}"
                 
-            grasp_points = model_data[model_name]['grasp_points']
-            object_pos = obj["position"]
-            object_quat = obj["quaternion"]
-            
-            # Transform object rotation to rotation matrix
-            rot_matrix = R.from_quat(object_quat).as_matrix()
-            
-            # Coordinate system transformation matrix (same as wireframe)
-            coord_transform = np.array([
-                [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-                [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-                [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-            ])
-            
-            # Process each grasp point
-            for grasp_point in grasp_points:
-                # Get grasp point position relative to object center
-                grasp_pos_local = np.array([
-                    grasp_point['position']['x'],
-                    grasp_point['position']['y'], 
-                    grasp_point['position']['z']
-                ])
+                # Set position (dots are assumed to be on table, so z=0.01m)
+                target_pose.pose.position.x = float(point[0])
+                target_pose.pose.position.y = float(point[1])
+                target_pose.pose.position.z = 0.01  # Table height
                 
-                # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
-                grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
+                # Set orientation (identity quaternion for points)
+                target_pose.pose.orientation.x = 0.0
+                target_pose.pose.orientation.y = 0.0
+                target_pose.pose.orientation.z = 0.0
+                target_pose.pose.orientation.w = 1.0
                 
-                # Transform to world frame
-                grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
+                # Set RPY angles (identity quaternion = 0,0,0)
+                target_pose.roll = 0.0
+                target_pose.pitch = 0.0
+                target_pose.yaw = 0.0
                 
-                # Create GraspPoint message
-                grasp_msg = GraspPoint()
-                grasp_msg.header.stamp = now
-                grasp_msg.header.frame_id = "base"
-                grasp_msg.object_name = model_name
-                grasp_msg.grasp_id = grasp_point['id']
-                grasp_msg.grasp_type = grasp_point.get('type', 'unknown')
-                
-                # Set position in world frame
-                grasp_msg.position.x = float(grasp_pos_world[0])
-                grasp_msg.position.y = float(grasp_pos_world[1])
-                grasp_msg.position.z = float(grasp_pos_world[2])
-                
-                # Set approach vector (transform to world frame)
-                if 'approach_vector' in grasp_point:
-                    approach_vec_local = np.array([
-                        grasp_point['approach_vector']['x'],
-                        grasp_point['approach_vector']['y'],
-                        grasp_point['approach_vector']['z']
-                    ])
-                    
-                    # Apply coordinate system transformation to approach vector
-                    approach_vec_transformed = coord_transform @ approach_vec_local
-                    
-                    # Transform approach vector to world frame
-                    approach_vec_world = rot_matrix @ approach_vec_transformed
-                    
-                    grasp_msg.approach_vector.x = float(approach_vec_world[0])
-                    grasp_msg.approach_vector.y = float(approach_vec_world[1])
-                    grasp_msg.approach_vector.z = float(approach_vec_world[2])
-                else:
-                    # Default approach vector (upward)
-                    grasp_msg.approach_vector.x = 0.0
-                    grasp_msg.approach_vector.y = 0.0
-                    grasp_msg.approach_vector.z = 1.0
-                
-                msg.grasp_points.append(grasp_msg)
+                msg.objects.append(target_pose)
         
-        # Publish the structured message
-        self.grasp_points_pub.publish(msg)
+        # Publish the targets message
+        self.targets_poses_pub.publish(msg)
 
     def publish_contacts(self, pushers):
+        """Publish pusher contact information"""
         now = self.get_clock().now().to_msg()
+        
         for pusher in pushers:
             msg = PusherInfo()
             msg.header = Header()
@@ -213,3 +209,27 @@ class LocalizerBridge(Node):
             msg.object_index = pusher['object_index']
             msg.local_contour_index = pusher['local_contour_index']
             self.pusher_publishers[msg.pusher_name].publish(msg)
+
+    def publish_recommended_contacts(self, recommended):
+        now = self.get_clock().now().to_msg()
+        (pos_1, norm_1), (pos_2, norm_2) = recommended
+        pos_1_msg = PointStamped()
+        pos_1_msg.header.stamp = now
+        pos_1_msg.header.frame_id = "base"
+        pos_1_msg.point.x, pos_1_msg.point.y, pos_1_msg.point.z = pos_1
+        self.recommended_publishers["pusher_1_position"].publish(pos_1_msg)
+        pos_2_msg = PointStamped()
+        pos_2_msg.header.stamp = now
+        pos_2_msg.header.frame_id = "base"
+        pos_2_msg.point.x, pos_2_msg.point.y, pos_2_msg.point.z = pos_2
+        self.recommended_publishers["pusher_2_position"].publish(pos_2_msg)
+        norm_1_msg = Vector3Stamped()
+        norm_1_msg.header.stamp = now
+        norm_1_msg.header.frame_id = "base"
+        norm_1_msg.vector.x, norm_1_msg.vector.y, norm_1_msg.vector.z = norm_1
+        self.recommended_publishers["pusher_1_normal"].publish(norm_1_msg)
+        norm_2_msg = Vector3Stamped()
+        norm_2_msg.header.stamp = now
+        norm_2_msg.header.frame_id = "base"
+        norm_2_msg.vector.x, norm_2_msg.vector.y, norm_2_msg.vector.z = norm_2
+        self.recommended_publishers["pusher_2_normal"].publish(norm_2_msg)

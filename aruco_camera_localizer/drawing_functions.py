@@ -1,7 +1,7 @@
 import cv2
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-    transform_points_world_to_img, transform_point_world_to_cam
+transform_points_world_to_img, transform_point_world_to_cam
 import numpy as np
 
 def canonicalize_euler(orientation):
@@ -86,13 +86,19 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
 
         axes_image = transform_points_world_to_img(axes_world, cam_pos, cam_quat, camera_matrix)
 
-        o, x, y, z = axes_image
-        if o and x:
-            cv2.arrowedLine(frame, o, x, (0, 0, 255), 2, tipLength=0.3)  # X: Red
-        if o and y:
-            cv2.arrowedLine(frame, o, y, (0, 255, 0), 2, tipLength=0.3)  # Y: Green
-        if o and z:
-            cv2.arrowedLine(frame, o, z, (255, 0, 0), 2, tipLength=0.3)  # Z: Blue
+        # Handle cases where some axes points might be behind the camera
+        if len(axes_image) >= 1:
+            o = axes_image[0]  # origin
+            x = axes_image[1] if len(axes_image) > 1 else None  # X axis
+            y = axes_image[2] if len(axes_image) > 2 else None  # Y axis  
+            z = axes_image[3] if len(axes_image) > 3 else None  # Z axis
+            
+            if o and x:
+                cv2.arrowedLine(frame, o, x, (0, 0, 255), 2, tipLength=0.3)  # X: Red
+            if o and y:
+                cv2.arrowedLine(frame, o, y, (0, 255, 0), 2, tipLength=0.3)  # Y: Green
+            if o and z:
+                cv2.arrowedLine(frame, o, z, (255, 0, 0), 2, tipLength=0.3)  # Z: Blue
 
         # Draw contact points
         # contact_points = obj["contacts"]
@@ -138,78 +144,58 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
 
     return frame
 
-def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_objects, model_data):
-    """Draw grasp points for identified objects"""
-    for obj in identified_objects:
-        model_name = obj["name"]
-        
-        # Check if this model has grasp points data
-        if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
+def draw_color_dot_poses(frame, camera_matrix, cam_pos, cam_quat, detected_color_points, color_visualization):
+    """Draw all detected color dot poses on the OpenCV frame"""
+    if not detected_color_points:
+        return frame
+    
+    # Draw dots for each detected color
+    for color_name, world_points in detected_color_points.items():
+        if not world_points:
             continue
             
-        grasp_points = model_data[model_name]['grasp_points']
-        object_pos = obj["position"]
-        object_quat = obj["quaternion"]
+        # Get visualization color for this color
+        color_bgr = color_visualization.get(color_name, (255, 255, 255))
         
-        # Transform object rotation to rotation matrix
-        rot_matrix = R.from_quat(object_quat).as_matrix()
+        # Transform world points to image coordinates
+        image_points = transform_points_world_to_img(world_points, cam_pos, cam_quat, camera_matrix)
         
-        # Coordinate system transformation matrix (same as wireframe)
-        coord_transform = np.array([
-            [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-            [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-            [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-        ])
-        
-        # Transform each grasp point from object center frame to world frame
-        world_grasp_points = []
-        for grasp_point in grasp_points:
-            # Get grasp point position relative to object center
-            grasp_pos_local = np.array([
-                grasp_point['position']['x'],
-                grasp_point['position']['y'], 
-                grasp_point['position']['z']
-            ])
-            
-            # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
-            grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
-            
-            # Transform to world frame
-            grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
-            world_grasp_points.append(grasp_pos_world)
-        
-        # Transform grasp points to image coordinates
-        grasp_points_img = transform_points_world_to_img(world_grasp_points, cam_pos, cam_quat, camera_matrix)
-        
-        # Draw grasp points
-        for i, (grasp_point_img, grasp_point) in enumerate(zip(grasp_points_img, grasp_points)):
-            if grasp_point_img is not None:
-                # Draw grasp point as a circle (Blue color)
-                cv2.circle(frame, grasp_point_img, 8, (255, 0, 0), -1)  # Blue circle, larger size
+        for i, (world_pt, img_pt) in enumerate(zip(world_points, image_points)):
+            if img_pt is None:
+                continue
                 
-                # Draw approach vector if available (DISABLED)
-                # if 'approach_vector' in grasp_point:
-                #     approach_vec = np.array([
-                #         grasp_point['approach_vector']['x'],
-                #         grasp_point['approach_vector']['y'],
-                #         grasp_point['approach_vector']['z']
-                #     ])
-                #     
-                #     # Apply coordinate system transformation to approach vector
-                #     approach_vec_transformed = coord_transform @ approach_vec
-                #     
-                #     # Transform approach vector to world frame
-                #     approach_vec_world = rot_matrix @ approach_vec_transformed
-                #     
-                #     # Calculate end point of approach vector (increased scale for better visibility)
-                #     approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility
-                #     approach_end_img = transform_points_world_to_img([approach_end_world], cam_pos, cam_quat, camera_matrix)
-                #     
-                #     if approach_end_img[0] is not None:
-                #         # Draw approach vector as arrow (thicker line for better visibility)
-                #         cv2.arrowedLine(frame, grasp_point_img, approach_end_img[0], (0, 255, 0), 3, tipLength=0.3)  # Green arrow
-                
-                # Draw grasp point ID (larger text for better visibility)
-                cv2.putText(frame, f"G{i+1}", 
-                           (grasp_point_img[0] + 10, grasp_point_img[1] - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)  # White text with thicker stroke
+            # Draw colored dot as a filled circle
+            cv2.circle(frame, img_pt, 8, color_bgr, -1)  # Colored filled circle
+            cv2.circle(frame, img_pt, 10, (255, 255, 255), 2)  # White outline
+            
+            # Draw label with background
+            label = f"{color_name.capitalize()}_{i}"
+            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+            
+            # Background rectangle for text
+            cv2.rectangle(frame, 
+                         (img_pt[0] - w//2 - 5, img_pt[1] - h - 20 - 5), 
+                         (img_pt[0] + w//2 + 5, img_pt[1] - 20 + 5), 
+                         (0, 0, 0), -1)
+            
+            # Draw text
+            cv2.putText(frame, label, 
+                       (img_pt[0] - w//2, img_pt[1] - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw coordinates text
+            coord_text = f"({world_pt[0]*1000:.1f}, {world_pt[1]*1000:.1f})"
+            (cw, ch), _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+            
+            # Background for coordinates
+            cv2.rectangle(frame, 
+                         (img_pt[0] - cw//2 - 3, img_pt[1] + 5), 
+                         (img_pt[0] + cw//2 + 3, img_pt[1] + ch + 10), 
+                         (0, 0, 0), -1)
+            
+            # Draw coordinates
+            cv2.putText(frame, coord_text, 
+                       (img_pt[0] - cw//2, img_pt[1] + ch + 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)  # Yellow text
+    
+    return frame
