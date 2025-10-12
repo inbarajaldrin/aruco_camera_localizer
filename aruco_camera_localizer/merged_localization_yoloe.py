@@ -16,6 +16,7 @@ import threading
 import rclpy
 import argparse
 import json
+import os
 from ultralytics import YOLOE
 from max_camera_msgs.srv import UpdateYoloPrompts
 
@@ -168,8 +169,10 @@ def parse_args():
                         help="Stops detecting yellow and green pushers")
     parser.add_argument("--recommend-push", action='store_true',
                         help="For each object, recommend where to push")
-    parser.add_argument("--yolo-model", type=str, default="max_camera_localizer/yoloe-11s-seg.pt",
-                        help="YOLO model path (default: max_camera_localizer/yoloe-11s-seg.pt)")
+    parser.add_argument("--yolo-mode", type=str, default="prompt-set",
+                        help="YOLO mode: 'prompt-set' for prompted detection (default: prompt-set)")
+    parser.add_argument("--yolo-model", type=str, default="aruco_camera_localizer/yoloe-11s-seg.pt",
+                        help="YOLO model path (default: aruco_camera_localizer/yoloe-11s-seg.pt)")
     parser.add_argument("--yolo-conf", type=float, default=0.4,
                         help="YOLO confidence threshold (default: 0.4)")
     parser.add_argument("--yolo-prompts", type=str, nargs='+', 
@@ -177,7 +180,9 @@ def parse_args():
                         help="YOLO detection prompts (default: hand)")
     parser.add_argument("--yolo-color-map", type=str, nargs='+',
                         help="Custom color mapping for prompts (format: prompt1:color1 prompt2:color2)")
-    return parser.parse_args()
+    # Use parse_known_args to avoid conflicts with ROS args
+    args, unknown = parser.parse_known_args()
+    return args, unknown
 
 def pick_closest_blob(blobs, last_position):
     if not blobs:
@@ -396,7 +401,10 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
     return detected_color_points, detection_metadata
 
 def main():
-    args = parse_args()
+    # Parse args first, before initializing ROS
+    args, unknown_args = parse_args()
+    
+    # Start ROS node with remaining args
     bridge_node = start_ros_node(camera_topic=args.camera_topic)
     
     # Set up YOLO prompt services and topics
@@ -450,12 +458,37 @@ def main():
     # Update global variables with command line arguments
     update_yolo_prompts(args.yolo_prompts, yolo_color_map)
 
-    # Initialize YOLO model with dynamic prompts
+    # Initialize YOLO model with dynamic prompts using improved loading
+    print(f"YOLO mode: {args.yolo_mode}")
     print(f"Loading YOLO model: {args.yolo_model}")
-    yolo_model = YOLOE(args.yolo_model)
-    yolo_model.set_classes(args.yolo_prompts, yolo_model.get_text_pe(args.yolo_prompts))
-    print(f"YOLO model loaded with prompts: {args.yolo_prompts}")
-    print(f"YOLO color mapping: {yolo_color_map}")
+    
+    # Get script directory and construct absolute model path
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(script_dir, args.yolo_model.split('/')[-1])  # Get just the filename
+    
+    if not os.path.exists(model_path):
+        print(f"⚠️ Model not found at {model_path}, trying relative path: {args.yolo_model}")
+        model_path = args.yolo_model
+    
+    # Change to script directory for model loading
+    original_cwd = os.getcwd()
+    os.chdir(script_dir)
+    
+    try:
+        yolo_model = YOLOE(model_path)
+        print(f"✅ Loaded YOLOE model from {model_path}")
+        
+        # Pre-compute text embeddings for all prompts
+        print("Pre-computing text embeddings...")
+        text_embeddings = yolo_model.get_text_pe(args.yolo_prompts)
+        
+        # Set prompts using the combined embeddings
+        yolo_model.set_classes(args.yolo_prompts, text_embeddings)
+        print(f"✅ YOLO model loaded with prompts: {args.yolo_prompts}")
+        print(f"✅ YOLO color mapping: {yolo_color_map}")
+    finally:
+        # Restore working directory
+        os.chdir(original_cwd)
     
     # Update the service and topic callbacks to use the yolo_model
     def service_callback_wrapper(request, response):

@@ -23,6 +23,21 @@ ros2 run aruco_camera_localizer camera_publisher --camera-id 8
 ros2 run aruco_camera_localizer localize_yoloe
 ```
 
+### Robosort with Custom Prompts (Most Common)
+
+**Terminal 1 - Start Camera Publisher:**
+```bash
+ros2 run aruco_camera_localizer camera_publisher --camera-id 8 --publish-topic /rgb_aruco
+```
+
+**Terminal 2 - Start Localizer with Prompt Set Mode:**
+```bash
+ros2 run aruco_camera_localizer localize_yoloe \
+    --camera-topic /rgb_aruco \
+    --yolo-mode prompt-set \
+    --yolo-prompts "red object"
+```
+
 ### Interactive Camera Selection
 
 If you don't know your camera ID, omit the `--camera-id` parameter:
@@ -59,15 +74,16 @@ ros2 run aruco_camera_localizer localize_yoloe \
     --camera-topic /my_robot/camera/raw
 ```
 
-### Example 3: Custom YOLO Settings
+### Example 3: Custom YOLO Settings with Prompt Set Mode
 ```bash
 # Terminal 1
 ros2 run aruco_camera_localizer camera_publisher --camera-id 8
 
-# Terminal 2 - Custom YOLO detection
+# Terminal 2 - Custom YOLO detection with prompt set mode
 ros2 run aruco_camera_localizer localize_yoloe \
-    --yolo-conf 0.5 \
-    --yolo-prompts hand wrench allen_key
+    --camera-topic /rgb_aruco \
+    --yolo-mode prompt-set \
+    --yolo-prompts "red object" "blue object"
 ```
 
 ### Example 4: Multiple Cameras
@@ -129,7 +145,8 @@ ros2 run aruco_camera_localizer localize_yoloe \
 | `--suppress-prints` | flag | False | Suppress console output |
 | `--no-pushers` | flag | False | Disable pusher detection |
 | `--recommend-push` | flag | False | Enable push recommendations |
-| `--yolo-model` | str | `max_camera_localizer/yoloe-11s-seg.pt` | YOLO model path |
+| `--yolo-mode` | str | `prompt-set` | YOLO mode: 'prompt-set' for prompted detection |
+| `--yolo-model` | str | `aruco_camera_localizer/yoloe-11s-seg.pt` | YOLO model path |
 | `--yolo-conf` | float | 0.4 | YOLO confidence threshold |
 | `--yolo-prompts` | list | `['hand']` | Detection prompts |
 | `--yolo-color-map` | list | None | Custom color mappings |

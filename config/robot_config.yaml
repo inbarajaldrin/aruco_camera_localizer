@@ -97,6 +97,7 @@ robots:
         # Offset: [134.101, 0.124, -127.589] mm = [0.134101, 0.000124, -0.127589] m
         position: [0.134101, 0.000124, -0.127589]
         # Orientation offset (quaternion) [x, y, z, w]
+        # 90 degree rotation around Y-axis
         quaternion: [0.0, 0.0, 0.0, 1.0]
       
       # Calibration offsets for fine-tuning camera position (meters)
