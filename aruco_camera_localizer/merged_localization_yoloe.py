@@ -28,34 +28,48 @@ c_height = config.get_camera_height()
 c_hfov = config.get_camera_hfov()
 c_vfov = config.get_camera_vfov()
 
+# OpenCV to camera frame transformation
+OPENCV_TO_CAMERA_QUAT = config.get_opencv_to_camera_quaternion()
+print(f"OpenCV-to-Camera quaternion: {OPENCV_TO_CAMERA_QUAT}")
+
+# Detection distance
+DETECTION_DISTANCE = config.get_detection_distance()
+print(f"Detection distance: {DETECTION_DISTANCE}m")
+
 fx = c_width / (2 * np.tan(np.deg2rad(c_hfov / 2)))
 print(f"Calculated fx as {fx}")
 
 fy = c_height / (2 * np.tan(np.deg2rad(c_vfov / 2)))
 print(f"Calculated fy as {fy}")
 
-def convert_2d_orientation_to_quaternion(orientation_angle, cam_quat):
+def convert_2d_orientation_to_quaternion(orientation_angle, cam_quat, opencv_to_camera_quat):
     """
     Convert 2D orientation angle from PCA to 3D quaternion in world frame.
+    
+    Transformation chain:
+    1. 2D angle → rotation in OpenCV frame (Z-axis rotation)
+    2. OpenCV frame → Camera frame (opencv_to_camera)
+    3. Camera frame → World/Base frame (camera quaternion)
     
     Args:
         orientation_angle: 2D orientation angle in radians from PCA
         cam_quat: Camera quaternion in world frame [x, y, z, w]
+        opencv_to_camera_quat: OpenCV to camera frame quaternion [x, y, z, w]
     
     Returns:
         quaternion: 3D quaternion in world frame [x, y, z, w]
     """
-    # Create rotation around Z-axis (vertical) based on 2D orientation
-    # The 2D angle represents the object's orientation in the image plane
+    # Step 1: Create rotation around Z-axis in OpenCV frame
     z_rotation = R.from_euler('z', orientation_angle)
+    opencv_quat = z_rotation.as_quat()
     
-    # Convert to quaternion
-    z_quat = z_rotation.as_quat()  # Returns [x, y, z, w]
+    # Step 2: Transform from OpenCV frame to camera frame
+    opencv_to_cam = R.from_quat(opencv_to_camera_quat)
+    camera_orientation = opencv_to_cam * R.from_quat(opencv_quat)
     
-    # Transform the orientation from camera frame to world frame
-    # The camera's orientation affects how the 2D orientation maps to 3D
+    # Step 3: Transform from camera frame to world frame
     cam_rotation = R.from_quat(cam_quat)
-    world_orientation = cam_rotation * R.from_quat(z_quat)
+    world_orientation = cam_rotation * camera_orientation
     
     return world_orientation.as_quat()
 
@@ -313,7 +327,7 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_color_map, height=0.01, conf_threshold=0.4, nms_threshold=0.3):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_color_map, opencv_to_camera_quat, distance=0.132, conf_threshold=0.4, nms_threshold=0.3):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -354,18 +368,22 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 center_x = (x1 + x2) / 2
                 center_y = (y1 + y2) / 2
                 
-                # Ray in camera frame
+                # Step 1: Ray in OpenCV frame
                 pixel = np.array([center_x, center_y, 1.0])
-                ray_cam = np.linalg.inv(camera_matrix) @ pixel
+                ray_opencv = np.linalg.inv(camera_matrix) @ pixel
                 
-                # Transform ray to world frame
+                # Step 2: Transform from OpenCV frame to camera frame
+                R_opencv_to_cam = R.from_quat(opencv_to_camera_quat)
+                ray_cam = R_opencv_to_cam.apply(ray_opencv)
+                
+                # Step 3: Transform ray to world frame
                 R_wc = R.from_quat(cam_quat).as_matrix()
                 ray_world = R_wc @ ray_cam
                 cam_origin_world = np.array(cam_pos)
                 
-                # Ray-plane intersection with z = height over table
-                t = (height - cam_origin_world[2]) / ray_world[2]
-                point_world = cam_origin_world + t * ray_world
+                # Step 4: Place object at fixed distance along ray
+                ray_normalized = ray_world / np.linalg.norm(ray_world)
+                point_world = cam_origin_world + ray_normalized * distance
                 
                 # Extract ROI for orientation analysis
                 roi, roi_offset = extract_object_roi(frame, box)
@@ -596,7 +614,8 @@ def main():
             detected_color_points, detection_metadata = detect_yolo_blobs(
                 frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat, 
                 current_prompts, current_color_map,
-                height=0.01, conf_threshold=args.yolo_conf, nms_threshold=0.3
+                OPENCV_TO_CAMERA_QUAT, 
+                distance=DETECTION_DISTANCE, conf_threshold=args.yolo_conf, nms_threshold=0.3
             )
             
             # Convert YOLO detections to object format for objects_poses topic
@@ -630,7 +649,7 @@ def main():
                         if metadata['orientation_angle'] is not None:
                             # Convert 2D orientation angle to 3D quaternion
                             orientation_quat = convert_2d_orientation_to_quaternion(
-                                metadata['orientation_angle'], cam_quat
+                                metadata['orientation_angle'], cam_quat, OPENCV_TO_CAMERA_QUAT
                             )
                     
                     yolo_detected_objects.append({

@@ -20,7 +20,7 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
-def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, height=0.01, min_area=120, merge_threshold=0.02):
+def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, opencv_to_camera_quat, distance=0.132, min_area=120, merge_threshold=0.02):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
     # Define blue range in HSV
@@ -43,18 +43,22 @@ def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_qu
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
 
-                # Step 1: Ray in camera frame
+                # Step 1: Ray in OpenCV frame
                 pixel = np.array([cx, cy, 1.0])
-                ray_cam = np.linalg.inv(camera_matrix) @ pixel
+                ray_opencv = np.linalg.inv(camera_matrix) @ pixel
 
-                # Step 2: Transform ray to world frame
+                # Step 2: Transform from OpenCV frame to camera frame
+                R_opencv_to_cam = R.from_quat(opencv_to_camera_quat)
+                ray_cam = R_opencv_to_cam.apply(ray_opencv)
+
+                # Step 3: Transform ray to world frame
                 R_wc = R.from_quat(cam_quat).as_matrix()
                 ray_world = R_wc @ ray_cam
                 cam_origin_world = np.array(cam_pos)
 
-                # Step 3: Ray-plane intersection with z = height over table
-                t = (height - cam_origin_world[2]) / ray_world[2]
-                point_world = cam_origin_world + t * ray_world
+                # Step 4: Place object at fixed distance along ray
+                ray_normalized = ray_world / np.linalg.norm(ray_world)
+                point_world = cam_origin_world + ray_normalized * distance
                 world_points.append(point_world)
 
     # Step 4: Merge nearby points in world frame

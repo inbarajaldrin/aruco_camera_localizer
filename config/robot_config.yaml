@@ -34,32 +34,38 @@ robots:
       # Field of view (degrees)
       horizontal_fov: 69.4
       vertical_fov: 42.5
+      
+      # OpenCV frame to Camera frame transformation
+      # OpenCV convention: X=right, Y=down, Z=forward (in image)
+      # This quaternion aligns OpenCV frame with physical camera's coordinate system
+      opencv_to_camera:
+        # For downward-facing camera (default)
+        quaternion: [0.0, 0.0, 0.0, 1.0]  # identity (no rotation)
+    
+    # Detection settings
+    detection:
+      # Distance from camera to place detected objects (meters)
+      # Objects are placed at this distance along the camera's optical axis
+      distance: 0.01  # 10mm default distance
     
     # Transform (TF) configuration
-    # How the camera is connected to the robot's coordinate frames
     transforms:
-      # Camera offset from end-effector (in EE frame)
-      # This defines where the camera is mounted relative to the robot's end-effector
-      camera_to_ee:
-        # Position offset (meters) [x, y, z]
-        position: [-0.012, -0.048, -0.01]
-        # Orientation offset (quaternion) [x, y, z, w]
-        # [0, 0, 0, 1] is identity (no rotation)
-        quaternion: [0.0, 0.0, 0.0, 1.0]
+      # Default/Home position of end-effector in base frame
+      ee_default:
+        position: [-0.144, -0.435, 0.202]  # meters [x, y, z]
+        quaternion: [0.0, 1.0, 0.0, 0.0]  # [x, y, z, w] - 180° Y rotation
       
-      # Calibration offsets for fine-tuning camera position (meters)
+      # Default camera pose in base frame (calculated from camera_to_ee offset)
+      # Camera-to-EE offset: [-0.012, -0.048, -0.01] with identity rotation
+      camera_default:
+        position: [-0.156, -0.483, 0.192]  # meters [x, y, z]
+        quaternion: [0.0, 1.0, 0.0, 0.0]  # [x, y, z, w] - same as EE
+      
+      # Calibration offsets (kept for compatibility)
       calibration_offset:
         x: 0.004  # 4mm correction in x
         y: 0.002  # 2mm correction in y
-        z: 0.0    # no z correction
-      
-      # Default/Home position of end-effector (used if ROS input unavailable)
-      # This is the fallback pose if communication with the robot fails
-      ee_default:
-        # Position in base frame (meters) [x, y, z]
-        position: [-0.144, -0.435, 0.202]
-        # Orientation in base frame (quaternion) [x, y, z, w]
-        quaternion: [0.0, 1.0, 0.0, 0.0]
+        z: 0.0
   
   # --------------------------------------------------------------------------
   # Robosort Robot Configuration
@@ -84,35 +90,35 @@ robots:
       # Field of view (degrees)
       horizontal_fov: 69.4
       vertical_fov: 42.5
+      
+      # OpenCV frame to Camera frame transformation
+      # OpenCV convention: X=right, Y=down, Z=forward (in image)
+      # For forward-facing camera pointing along -X axis in base frame
+      # Transformation: Y-90° then Z-90° (X-90° then Z-90° gives -X direction)
+      opencv_to_camera:
+        quaternion: [-0.5, -0.5, 0.5, 0.5]  # Forward-facing camera (-X direction)
+    
+    # Detection settings
+    detection:
+      # Distance from camera to place detected objects (meters)
+      # Objects are placed at this distance along the camera's optical axis
+      distance: 0.132  # 132mm for robosort forward-facing setup
     
     # Transform (TF) configuration
-    # How the camera is connected to the robot's coordinate frames
     transforms:
-      # Camera offset from end-effector (in EE frame)
-      camera_to_ee:
-        # Position offset (meters) [x, y, z]
-        # Calculated from: Camera position - EE position at [0,0,0]
-        # Camera: [-58.649, 0.124, 42.411] mm
-        # EE (gripper center): [-192.75, 0.0, 170.0] mm
-        # Offset: [134.101, 0.124, -127.589] mm = [0.134101, 0.000124, -0.127589] m
-        position: [0.134101, 0.000124, -0.127589]
-        # Orientation offset (quaternion) [x, y, z, w]
-        # 90 degree rotation around Y-axis
-        quaternion: [0.0, 0.0, 0.0, 1.0]
+      # Default/Home position of end-effector in base frame
+      ee_default:
+        position: [-0.19275, 0.0, 0.170]  # meters [x, y, z]
+        quaternion: [0.0, 0.7071068, 0.0, 0.7071068]  # [x, y, z, w] - 90° Y rotation
       
-      # Calibration offsets for fine-tuning camera position (meters)
+      # Default camera pose in base frame (when using ee_default)
+      # Camera-to-EE offset is calculated from these two poses
+      camera_default:
+        position: [-0.058649, 0.000124, 0.042411]  # meters [x, y, z]
+        quaternion: [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] - identity
+      
+      # Calibration offsets (kept for compatibility, not used in new logic)
       calibration_offset:
         x: 0.0
         y: 0.0
         z: 0.0
-      
-      # Default/Home position of end-effector
-      ee_default:
-        # Position in base frame (meters) [x, y, z]
-        # Home position at joint angles [0.0, 0.0, 0.0]
-        # FK result: [-192.75, 0.0, 170.0] mm = [-0.19275, 0.0, 0.170] m
-        position: [-0.19275, 0.0, 0.170]
-        # Orientation in base frame (quaternion) [x, y, z, w]
-        # Identity orientation (pointing down)
-        quaternion: [0.0, 0.0, 0.0, 1.0]
-

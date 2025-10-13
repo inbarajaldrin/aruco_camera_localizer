@@ -17,16 +17,30 @@ class LocalizerBridge(Node):
         # Load configuration from YAML
         config = get_config()
         
-        # Offset of camera from EE (in EE frame)
-        self.cam_offset_position = config.get_camera_to_ee_position()
-        self.cam_offset_quat = config.get_camera_to_ee_quaternion()
+        # Calculate camera-to-EE offset from default poses
+        # This matches the logic in opencv_to_base_transform.py
+        ee_pos = config.get_ee_default_position()
+        ee_quat = config.get_ee_default_quaternion()
+        cam_pos = config.get_camera_default_position()
+        cam_quat = config.get_camera_default_quaternion()
         
-        # Calibration offsets for camera position correction
+        # Calculate offset position in EE frame
+        R_ee_inv = R.from_quat(ee_quat).inv()
+        offset_world = cam_pos - ee_pos
+        self.cam_offset_position = R_ee_inv.apply(offset_world)
+        
+        # Calculate offset quaternion
+        self.cam_offset_quat = (R_ee_inv * R.from_quat(cam_quat)).as_quat()
+        
+        self.get_logger().info(f"Camera-to-EE offset position: {self.cam_offset_position}")
+        self.get_logger().info(f"Camera-to-EE offset quaternion: {self.cam_offset_quat}")
+        
+        # Calibration offsets (not used in new logic)
         self.calibration_offset_x, self.calibration_offset_y, _ = config.get_calibration_offset()
         
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
-        self.ee_position = config.get_ee_default_position()
-        self.ee_quat = config.get_ee_default_quaternion()
+        self.ee_position = ee_pos
+        self.ee_quat = ee_quat
         self.lock = threading.Lock()
         
         # --- Latest camera frame ---

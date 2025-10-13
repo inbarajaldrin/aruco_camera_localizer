@@ -23,6 +23,14 @@ c_height = config.get_camera_height()
 c_hfov = config.get_camera_hfov()
 c_vfov = config.get_camera_vfov()
 
+# OpenCV to camera frame transformation
+OPENCV_TO_CAMERA_QUAT = config.get_opencv_to_camera_quaternion()
+print(f"OpenCV-to-Camera quaternion: {OPENCV_TO_CAMERA_QUAT}")
+
+# Detection distance
+DETECTION_DISTANCE = config.get_detection_distance()
+print(f"Detection distance: {DETECTION_DISTANCE}m")
+
 fx = c_width / (2 * np.tan(np.deg2rad(c_hfov / 2)))
 print(f"Calculated fx as {fx}")
 
@@ -187,7 +195,8 @@ def main():
         # Detect all configured colors dynamically
         for color_name, color_range in COLOR_RANGES.items():
             color_bgr = COLOR_VISUALIZATION.get(color_name, (255, 255, 255))
-            world_points, _ = detect_color_blobs(frame, color_range, color_bgr, CAMERA_MATRIX, cam_pos, cam_quat)
+            world_points, _ = detect_color_blobs(frame, color_range, color_bgr, CAMERA_MATRIX, cam_pos, cam_quat, 
+                                                   OPENCV_TO_CAMERA_QUAT, distance=DETECTION_DISTANCE)
             detected_color_points[color_name] = world_points
             all_target_points.extend(world_points)
         

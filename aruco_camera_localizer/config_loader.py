@@ -80,20 +80,17 @@ class RobotConfig:
                         [0, fy, height / 2],
                         [0, 0, 1]], dtype=np.float32)
     
+    def get_opencv_to_camera_quaternion(self):
+        """Get OpenCV frame to camera frame quaternion transformation"""
+        return np.array(self._config['camera']['opencv_to_camera']['quaternion'])
+    
+    # ========== Detection Configuration ==========
+    
+    def get_detection_distance(self):
+        """Get detection distance from camera (meters)"""
+        return self._config['detection']['distance']
+    
     # ========== Transform Configuration ==========
-    
-    def get_camera_to_ee_position(self):
-        """Get camera position offset from end-effector (meters)"""
-        return np.array(self._config['transforms']['camera_to_ee']['position'])
-    
-    def get_camera_to_ee_quaternion(self):
-        """Get camera orientation offset from end-effector (quaternion)"""
-        return np.array(self._config['transforms']['camera_to_ee']['quaternion'])
-    
-    def get_calibration_offset(self):
-        """Get calibration offset for fine-tuning (meters)"""
-        offset = self._config['transforms']['calibration_offset']
-        return offset['x'], offset['y'], offset['z']
     
     def get_ee_default_position(self):
         """Get default end-effector position in base frame (meters)"""
@@ -102,6 +99,19 @@ class RobotConfig:
     def get_ee_default_quaternion(self):
         """Get default end-effector orientation in base frame (quaternion)"""
         return np.array(self._config['transforms']['ee_default']['quaternion'])
+    
+    def get_camera_default_position(self):
+        """Get default camera position in base frame (meters)"""
+        return np.array(self._config['transforms']['camera_default']['position'])
+    
+    def get_camera_default_quaternion(self):
+        """Get default camera orientation in base frame (quaternion)"""
+        return np.array(self._config['transforms']['camera_default']['quaternion'])
+    
+    def get_calibration_offset(self):
+        """Get calibration offset for fine-tuning (meters)"""
+        offset = self._config['transforms']['calibration_offset']
+        return offset['x'], offset['y'], offset['z']
 
 
 # Singleton instance for easy access
