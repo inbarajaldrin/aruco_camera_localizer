@@ -234,7 +234,7 @@ def main():
         # ML prediction section removed
 
         detected_objects = identified_objects.copy()
-        bridge_node.publish_camera_pose(cam_pos, cam_quat)
+        # Camera pose is published by external package, we only subscribe to it
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
         bridge_node.publish_contacts(nearest_pushers)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)

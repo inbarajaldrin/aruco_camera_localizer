@@ -38,10 +38,15 @@ class LocalizerBridge(Node):
         # Calibration offsets (not used in new logic)
         self.calibration_offset_x, self.calibration_offset_y, _ = config.get_calibration_offset()
         
-        # --- Latest EE Pose (using values here if no ROS input - Home position) ---
+        # --- Latest EE Pose (from ROS topic, defaults used if no input) ---
         self.ee_position = ee_pos
         self.ee_quat = ee_quat
         self.lock = threading.Lock()
+        
+        # --- Latest Camera Pose (from ROS topic, defaults used if no input) ---
+        self.cam_position = cam_pos
+        self.cam_quat = cam_quat
+        self.cam_lock = threading.Lock()
         
         # --- Latest camera frame ---
         self.latest_frame = None
@@ -57,6 +62,14 @@ class LocalizerBridge(Node):
             10)
         self.get_logger().info(f"LocalizerBridge started. Subscribing to: {tcp_pose_topic}")
         
+        # Subscribe to camera pose topic
+        self.camera_pose_subscription = self.create_subscription(
+            PoseStamped,
+            '/camera_pose',
+            self.camera_pose_callback,
+            10)
+        self.get_logger().info(f"Subscribing to camera pose on: /camera_pose")
+        
         # Subscribe to camera images
         self.camera_subscription = self.create_subscription(
             Image,
@@ -66,7 +79,7 @@ class LocalizerBridge(Node):
         self.get_logger().info(f"Subscribing to camera images on: {camera_topic}")
         
         # --- Publishers ---
-        self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
+        # Note: /camera_pose is published by external package, we only subscribe
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
         self.annotated_image_publisher = self.create_publisher(Image, 'intel_camera_annotated', 10)
         self.bridge = CvBridge()
@@ -101,6 +114,13 @@ class LocalizerBridge(Node):
             self.ee_quat = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
                                    msg.pose.orientation.z, msg.pose.orientation.w])
 
+    def camera_pose_callback(self, msg: PoseStamped):
+        """Callback for receiving camera pose from /camera_pose topic"""
+        with self.cam_lock:
+            self.cam_position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+            self.cam_quat = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
+                                     msg.pose.orientation.z, msg.pose.orientation.w])
+
     def camera_callback(self, msg: Image):
         """Callback for receiving camera frames from the camera publisher"""
         try:
@@ -120,17 +140,9 @@ class LocalizerBridge(Node):
             return self.latest_frame.copy() if self.latest_frame is not None else None
 
     def get_camera_pose(self):
-        with self.lock:
-            r_ee = R.from_quat(self.ee_quat)
-            r_cam_offset = R.from_quat(self.cam_offset_quat)
-            cam_pos_world = self.ee_position + r_ee.apply(self.cam_offset_position)
-            
-            # Apply calibration offsets in the camera frame
-            calibration_offset = np.array([self.calibration_offset_x, self.calibration_offset_y, 0.0])
-            cam_pos_world += r_ee.apply(calibration_offset)
-            
-            cam_quat_world = (r_ee * r_cam_offset).as_quat()
-        return cam_pos_world, cam_quat_world
+        """Get camera pose from the subscribed /camera_pose topic"""
+        with self.cam_lock:
+            return self.cam_position.copy(), self.cam_quat.copy()
 
     def canonicalize_euler(self, orientation):
         """Forces euler angles near the form (-180, 0, yaw') to take the equivalent form (0, 180, yaw)"""
@@ -140,13 +152,8 @@ class LocalizerBridge(Node):
         else:
             return orientation
 
-    def publish_camera_pose(self, pos, quat):
-        msg = PoseStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base"
-        msg.pose.position.x, msg.pose.position.y, msg.pose.position.z = pos
-        msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w = quat
-        self.cam_pose_pub.publish(msg)
+    # Removed: publish_camera_pose() - camera pose is now published by external package
+    # We only subscribe to /camera_pose topic
 
     def publish_object_poses(self, object_data):
         """Publish all object poses in a single structured topic"""
