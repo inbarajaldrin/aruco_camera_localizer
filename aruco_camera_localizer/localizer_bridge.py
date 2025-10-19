@@ -11,7 +11,7 @@ import threading
 from aruco_camera_localizer.config_loader import get_config
 
 class LocalizerBridge(Node):
-    def __init__(self, camera_topic='/camera/image_raw'):
+    def __init__(self, camera_topic='/camera/image_raw', depth_topic=None):
         super().__init__('localizer_bridge')
         
         # Load configuration from YAML
@@ -35,8 +35,9 @@ class LocalizerBridge(Node):
         self.get_logger().info(f"Camera-to-EE offset position: {self.cam_offset_position}")
         self.get_logger().info(f"Camera-to-EE offset quaternion: {self.cam_offset_quat}")
         
-        # Calibration offsets (not used in new logic)
-        self.calibration_offset_x, self.calibration_offset_y, _ = config.get_calibration_offset()
+        # Calibration offsets for fine-tuning object positions
+        self.calibration_offset_x, self.calibration_offset_y, self.calibration_offset_z = config.get_calibration_offset()
+        self.get_logger().info(f"Calibration offset: x={self.calibration_offset_x}, y={self.calibration_offset_y}, z={self.calibration_offset_z}")
         
         # --- Latest EE Pose (from ROS topic, defaults used if no input) ---
         self.ee_position = ee_pos
@@ -51,6 +52,10 @@ class LocalizerBridge(Node):
         # --- Latest camera frame ---
         self.latest_frame = None
         self.frame_lock = threading.Lock()
+        
+        # --- Latest depth image ---
+        self.latest_depth = None
+        self.depth_lock = threading.Lock()
         
         # Get TCP pose topic from configuration
         tcp_pose_topic = config.get_tcp_pose_topic()
@@ -77,6 +82,18 @@ class LocalizerBridge(Node):
             self.camera_callback,
             10)
         self.get_logger().info(f"Subscribing to camera images on: {camera_topic}")
+        
+        # Subscribe to depth images (if depth topic provided)
+        self.depth_subscription = None
+        if depth_topic:
+            self.depth_subscription = self.create_subscription(
+                Image,
+                depth_topic,
+                self.depth_callback,
+                10)
+            self.get_logger().info(f"Subscribing to depth images on: {depth_topic}")
+        else:
+            self.get_logger().info("No depth topic provided, using config distance")
         
         # --- Publishers ---
         # Note: /camera_pose is published by external package, we only subscribe
@@ -131,6 +148,22 @@ class LocalizerBridge(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to convert camera image: {e}")
 
+    def depth_callback(self, msg: Image):
+        """Callback for receiving depth images"""
+        try:
+            # Convert ROS Image message to OpenCV format
+            # Try different depth encodings (Isaac Sim might use different formats)
+            try:
+                depth_image = self.bridge.imgmsg_to_cv2(msg, "passthrough")
+            except Exception as e:
+                self.get_logger().warn(f"Failed passthrough, trying 16UC1: {e}")
+                depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")
+            
+            with self.depth_lock:
+                self.latest_depth = depth_image
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert depth image: {e}")
+
     def get_ee_pose(self):
         return self.ee_position, self.ee_quat
     
@@ -138,6 +171,19 @@ class LocalizerBridge(Node):
         """Get the latest camera frame (thread-safe)"""
         with self.frame_lock:
             return self.latest_frame.copy() if self.latest_frame is not None else None
+
+    def get_latest_depth(self):
+        """Get the latest depth image (thread-safe)"""
+        with self.depth_lock:
+            return self.latest_depth.copy() if self.latest_depth is not None else None
+
+    def apply_calibration_offset(self, position):
+        """Apply calibration offset to a world position"""
+        return np.array([
+            position[0] + self.calibration_offset_x,
+            position[1] + self.calibration_offset_y,
+            position[2] + self.calibration_offset_z
+        ])
 
     def get_camera_pose(self):
         """Get camera pose from the subscribed /camera_pose topic"""

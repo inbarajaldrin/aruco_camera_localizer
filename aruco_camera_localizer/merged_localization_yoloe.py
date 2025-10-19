@@ -112,9 +112,9 @@ pusher_distance_max = 0.030
 
 trackers = {}
 
-def start_ros_node(camera_topic='/camera/image_raw'):
+def start_ros_node(camera_topic='/camera/image_raw', depth_topic=None):
     rclpy.init()
-    node = LocalizerBridge(camera_topic=camera_topic)
+    node = LocalizerBridge(camera_topic=camera_topic, depth_topic=depth_topic)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
     return node
@@ -177,6 +177,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run ArUco pose tracker with YOLO detection.")
     parser.add_argument("--camera-topic", type=str, default="/camera/image_raw",
                         help="ROS2 topic to subscribe for camera images (default: /camera/image_raw)")
+    parser.add_argument("--depth-topic", type=str, default=None,
+                        help="ROS2 topic to subscribe for depth images (optional, uses config distance if not provided)")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     parser.add_argument("--no-pushers", action='store_true',
@@ -327,7 +329,7 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_color_map, opencv_to_camera_quat, distance=0.132, conf_threshold=0.4, nms_threshold=0.3):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_color_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -368,6 +370,27 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 center_x = (x1 + x2) / 2
                 center_y = (y1 + y2) / 2
                 
+                # Extract depth value at center if depth image is available
+                actual_distance = distance  # Default to config distance
+                if depth_image is not None:
+                    center_x_int = int(center_x)
+                    center_y_int = int(center_y)
+                    
+                    if (0 <= center_x_int < depth_image.shape[1] and 
+                        0 <= center_y_int < depth_image.shape[0]):
+                        depth_raw = depth_image[center_y_int, center_x_int]
+                        
+                        # Handle different depth formats
+                        if depth_raw > 0:
+                            # Isaac Sim typically uses meters (float32), regular depth uses mm (uint16)
+                            if depth_image.dtype == np.float32:
+                                actual_distance = depth_raw  # Already in meters
+                            else:
+                                actual_distance = depth_raw / 1000.0  # Convert mm to meters
+                        else:
+                            # Invalid depth value, use config distance
+                            pass
+                
                 # Step 1: Ray in OpenCV frame
                 pixel = np.array([center_x, center_y, 1.0])
                 ray_opencv = np.linalg.inv(camera_matrix) @ pixel
@@ -381,9 +404,14 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 ray_world = R_wc @ ray_cam
                 cam_origin_world = np.array(cam_pos)
                 
-                # Step 4: Place object at fixed distance along ray
+                # Step 4: Place object at actual distance along ray
                 ray_normalized = ray_world / np.linalg.norm(ray_world)
-                point_world = cam_origin_world + ray_normalized * distance
+                point_world = cam_origin_world + ray_normalized * actual_distance
+                
+                # Step 5: Apply calibration offset to object position
+                if bridge_node is not None:
+                    point_world = bridge_node.apply_calibration_offset(point_world)
+                
                 
                 # Extract ROI for orientation analysis
                 roi, roi_offset = extract_object_roi(frame, box)
@@ -423,7 +451,7 @@ def main():
     args, unknown_args = parse_args()
     
     # Start ROS node with remaining args
-    bridge_node = start_ros_node(camera_topic=args.camera_topic)
+    bridge_node = start_ros_node(camera_topic=args.camera_topic, depth_topic=args.depth_topic)
     
     # Set up YOLO prompt services and topics
     from std_msgs.msg import String
@@ -598,6 +626,8 @@ def main():
                     tvec, rvec = kalman_filters[marker_id].predict()
                     rquat = rvec_to_quat(rvec)
                     world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
+                    # Apply calibration offset to ArUco marker positions
+                    world_pos = bridge_node.apply_calibration_offset(world_pos)
                     world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
                     identified_jenga.append({
                                         "name": f"jenga_{marker_id}",
@@ -611,11 +641,15 @@ def main():
 
             # YOLO Detection Section (replaces color blob detection)
             current_prompts, current_color_map = get_yolo_prompts()
+            
+            # Get latest depth image if available
+            depth_image = bridge_node.get_latest_depth()
+            
             detected_color_points, detection_metadata = detect_yolo_blobs(
                 frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat, 
                 current_prompts, current_color_map,
                 OPENCV_TO_CAMERA_QUAT, 
-                distance=DETECTION_DISTANCE, conf_threshold=args.yolo_conf, nms_threshold=0.3
+                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3
             )
             
             # Convert YOLO detections to object format for objects_poses topic
