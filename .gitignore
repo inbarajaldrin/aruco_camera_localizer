@@ -1,1 +1,3 @@
 *.webm
+__pycache__/
+mobileclip_blt.ts
