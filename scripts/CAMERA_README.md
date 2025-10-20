@@ -38,6 +38,15 @@ ros2 run aruco_camera_localizer localize_yoloe \
     --yolo-prompts "red object"
 ```
 
+**Terminal 2 - Start Localizer with Prompt Set Mode + Depth:**
+```bash
+ros2 run aruco_camera_localizer localize_yoloe \
+    --camera-topic /rgb \
+    --depth-topic /depth \
+    --yolo-mode prompt-set \
+    --yolo-prompts "red object"
+```
+
 ### Interactive Camera Selection
 
 If you don't know your camera ID, omit the `--camera-id` parameter:

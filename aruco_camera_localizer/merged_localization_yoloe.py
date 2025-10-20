@@ -687,7 +687,7 @@ def main():
                             )
                     
                     yolo_detected_objects.append({
-                        "name": f"{color_name}_dot_{i}",
+                        "name": f"{color_name}_{i}",
                         "points": [point],
                         "position": point,
                         "quaternion": orientation_quat,
