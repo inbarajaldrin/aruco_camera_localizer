@@ -114,7 +114,7 @@ Second is a set of initial values for EE pose, to be used if ROS2 fails to updat
 1. Camera parameters: Image frame height and width, in pixels, plus angular FOV. Distortion coefficient is included. These are specific to the camera hardware used. 
 2. `MARKER_SIZE` is the side length of the ArUco marker used for identifying Jenga blocks.
 3. `BLOCK_*` are the side measures of the Jenga blocks. 
-4. `TARGET_POSES` are the goal position and orientation for all objects.
+4. ~~`TARGET_POSES`~~ (removed) - Target poses functionality has been removed from the codebase.
 
 ### `object_frame_definitions.py`
 

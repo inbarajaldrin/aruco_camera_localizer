@@ -9,8 +9,7 @@ from aruco_camera_localizer.camera_selection import detect_available_cameras, se
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
 transform_points_world_to_img, transform_point_world_to_cam
-from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
-    identify_objects_from_blobs, attempt_recovery_for_missing_objects
+from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
 import threading
@@ -39,18 +38,7 @@ ARUCO_DICTS = {
     "DICT_4X4_50": aruco.DICT_4X4_50,
     # "DICT_5X5_250": aruco.DICT_5X5_250
 }
-OBJECT_DICTS = { # mm
-    "allen_key": [38.8, 102.6, 129.5],
-    "wrench": [37, 70, 70]
-}
-TARGET_POSES = {
-    # position mm and orientation degrees
-    "jenga": ([40, -600, 10], [0, 0, 0]),
-    "wrench": ([40, -600, 10], [0, 0, 0]),
-    "allen_key": ([40, -600, 10], [0, 0, 0]),
-}
 
-blue_range = [np.array([100, 80, 80]), np.array([140, 255, 255])]
 
 trackers = {}
 
@@ -331,17 +319,19 @@ def create_wireframe_mask(projected_vertices, edges, image_shape):
 
 
 
-def start_ros_node():
+def start_ros_node(image_topic=None):
     rclpy.init()
-    node = LocalizerBridge()
+    node = LocalizerBridge(image_topic)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
     return node
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run ArUco pose tracker with optional camera ID.")
+    parser = argparse.ArgumentParser(description="Run ArUco pose tracker with optional camera ID or ROS image topic.")
     parser.add_argument("--camera-id", type=int, default=None,
                         help="Camera device ID to use (e.g., 8). If not set, will scan and prompt.")
+    parser.add_argument("--image-topic", type=str, default=None,
+                        help="ROS2 image topic to subscribe to (e.g., '/camera/image_raw'). If provided, camera input is disabled.")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     return parser.parse_args()
@@ -350,7 +340,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    bridge_node = start_ros_node()
+    bridge_node = start_ros_node(args.image_topic)
 
     # Load aruco_localizer data
     current_dir = Path(__file__).parent
@@ -438,36 +428,58 @@ def main():
     last_seen_frames = {}
     frame_idx = 0
 
-    if args.camera_id is not None:
-        cam_id = args.camera_id
-    else:        
-        available = detect_available_cameras()
-        if not available:
+    # Determine input source
+    use_ros_topic = args.image_topic is not None
+    cap = None
+    
+    if use_ros_topic:
+        print(f"Using ROS image topic: {args.image_topic}")
+        print("Waiting for images from ROS topic...")
+        # Wait for first frame
+        import time
+        while True:
+            frame, frame_available = bridge_node.get_latest_frame()
+            if frame_available:
+                print("Received first frame from ROS topic")
+                break
+            time.sleep(0.1)
+    else:
+        # Camera mode
+        if args.camera_id is not None:
+            cam_id = args.camera_id
+        else:        
+            available = detect_available_cameras()
+            if not available:
+                return
+            cam_id = select_camera(available)
+            if cam_id is None:
+                return
+
+        cap = cv2.VideoCapture(cam_id)
+        if not cap.isOpened():
             return
-        cam_id = select_camera(available)
-        if cam_id is None:
-            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, c_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c_height)
+        cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4500)
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
+        cap.set(cv2.CAP_PROP_EXPOSURE, -7.0)
 
     talk = not args.suppress_prints
-
-    cap = cv2.VideoCapture(cam_id)
-    if not cap.isOpened():
-        return
-
     parameters = aruco.DetectorParameters()
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, c_width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c_height)
-    cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-    cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4500)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -7.0)
     print("Press 'q' to quit.")
 
     detected_objects = []
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        if use_ros_topic:
+            frame, frame_available = bridge_node.get_latest_frame()
+            if not frame_available:
+                continue
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
         # Publish raw camera image
         bridge_node.publish_image(frame)
@@ -606,31 +618,9 @@ def main():
                             # Draw green wireframe lines directly
                             cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
 
-        # Blue Blob Section
-        world_points, _ = detect_color_blobs(frame, blue_range, (255,0,0), CAMERA_MATRIX, cam_pos, cam_quat)
-        identified_objects = identify_objects_from_blobs(world_points, OBJECT_DICTS)
-
-
-        # Check for disappeared objects
-        missing = False
-        for det in detected_objects:
-            if not any(obj["name"] == det["name"] for obj in identified_objects):
-                missing = True
-        
-        # Attempt recovery if any objects are missing
-        if missing: 
-            recovered_objects = attempt_recovery_for_missing_objects(detected_objects, world_points, known_triangles=OBJECT_DICTS)
-        else:
-            recovered_objects = None
-
-        # Avoid duplicating recovered ones already present
-        if recovered_objects:
-            for rec in recovered_objects:
-                if not any(obj["name"] == rec["name"] for obj in identified_objects):
-                    identified_objects.append(rec)
-
-
-        detected_objects = identified_objects.copy()
+        # Blue blob detection removed - only using ArUco markers now
+        identified_objects = []
+        detected_objects = []
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
         bridge_node.publish_grasp_points(identified_objects+identified_jenga, model_data)
@@ -642,7 +632,8 @@ def main():
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    cap.release()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":

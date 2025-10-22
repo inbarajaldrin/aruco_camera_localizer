@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation as R
 import threading
 
 class LocalizerBridge(Node):
-    def __init__(self):
+    def __init__(self, image_topic=None):
         super().__init__('localizer_bridge')
         # Offset of camera from EE (in EE frame)
         self.cam_offset_position = np.array([-0.012, -0.048, -0.01]) # meters
@@ -19,12 +19,26 @@ class LocalizerBridge(Node):
         self.ee_position = np.array([-0.144, -0.435, 0.202])
         self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
         self.lock = threading.Lock()
+        self.image_lock = threading.Lock()
+        self.latest_frame = None
+        self.frame_available = False
+        
         self.subscription = self.create_subscription(
             PoseStamped,
             '/tcp_pose_broadcaster/pose',
             self.ee_pose_callback,
             10)
         self.get_logger().info("TCPSubscriber node started.")
+        
+        # Image subscription if topic is provided
+        if image_topic:
+            self.image_subscription = self.create_subscription(
+                Image,
+                image_topic,
+                self.image_callback,
+                10)
+            self.get_logger().info(f"Subscribed to image topic: {image_topic}")
+        
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
@@ -42,6 +56,23 @@ class LocalizerBridge(Node):
     def publish_image(self, frame):
         img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
         self.image_publisher.publish(img_msg)
+
+    def image_callback(self, msg: Image):
+        """Callback for incoming image messages"""
+        try:
+            with self.image_lock:
+                self.latest_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+                self.frame_available = True
+        except Exception as e:
+            self.get_logger().error(f"Error converting image: {e}")
+
+    def get_latest_frame(self):
+        """Get the latest frame from ROS topic"""
+        with self.image_lock:
+            if self.frame_available:
+                return self.latest_frame.copy(), True
+            else:
+                return None, False
 
     def ee_pose_callback(self, msg: PoseStamped):
         with self.lock:
