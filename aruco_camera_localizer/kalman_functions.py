@@ -21,8 +21,8 @@ class QuaternionKalman:
 
         # Process noise covariance (Q). Lower Values = More Inertia
         self.kf.processNoiseCov = np.eye(10, dtype=np.float32) * 1e-5
-        for i in range(3):   # x, y, z - position uncertainty
-            self.kf.processNoiseCov[i, i] = 1e-3
+        for i in range(3):   # x, y, z - position uncertainty (even lower for maximum stability)
+            self.kf.processNoiseCov[i, i] = 1e-8  # Reduced from 1e-6 to 1e-8
         for i in range(3, 7):  # quaternion x, y, z, w - orientation uncertainty
             self.kf.processNoiseCov[i, i] = 1e-2
         for i in range(7, 10):  # vx, vy, vz - velocity uncertainty
@@ -31,8 +31,8 @@ class QuaternionKalman:
 
         # Measurement noise covariance (R). Lower Values = More Trust = You have good cameras
         self.kf.measurementNoiseCov = np.eye(7, dtype=np.float32)
-        for i in range(3):   # position - trust measurements more
-            self.kf.measurementNoiseCov[i, i] = 1e-3
+        for i in range(3):   # position - trust measurements much more
+            self.kf.measurementNoiseCov[i, i] = 1e-4  # Reduced from 1e-3 to 1e-4
         for i in range(3, 7):  # quaternion - orientation measurements are less reliable
             self.kf.measurementNoiseCov[i, i] = 1e-2
         
@@ -43,6 +43,10 @@ class QuaternionKalman:
         self.kf.statePost[3:7] = np.array([[0], [0], [0], [1]], dtype=np.float32)  # Identity quaternion
 
     def correct(self, tvec, rvec):
+        # Store raw measurements for get_raw_measurement()
+        self.last_measurement_tvec = tvec.copy()
+        self.last_measurement_rvec = rvec.copy()
+        
         quat = rvec_to_quat(rvec)
         measurement = np.vstack((tvec.reshape(3, 1), np.array(quat).reshape(4, 1))).astype(np.float32)
         self.kf.correct(measurement)
@@ -55,6 +59,15 @@ class QuaternionKalman:
         pred_quat /= np.linalg.norm(pred_quat)
         pred_rvec = quat_to_rvec(pred_quat).flatten()
         return pred_tvec, pred_rvec
+    
+    def get_raw_measurement(self):
+        """Get the last raw measurement without Kalman prediction"""
+        # Return the last measurement that was used for correction
+        if hasattr(self, 'last_measurement_tvec') and hasattr(self, 'last_measurement_rvec'):
+            return self.last_measurement_tvec, self.last_measurement_rvec
+        else:
+            # Fallback to prediction if no raw measurement available
+            return self.predict()
     
     def reset(self):
         """Reset the Kalman filter to initial state"""

@@ -11,6 +11,7 @@ from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_o
 transform_points_world_to_img, transform_point_world_to_cam
 from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
     identify_objects_from_blobs, attempt_recovery_for_missing_objects
+from aruco_camera_localizer.kalman_functions import QuaternionKalman
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
 import threading
 import rclpy
@@ -105,8 +106,8 @@ def estimate_object_pose_from_marker(marker_pose, aruco_annotation):
         marker_relative_pose['position']['z']
     ])
     
-    # Apply scaling and coordinate transformation
-    marker_pos_in_object = coord_transform @ (marker_pos_in_object * 1.25)
+    # Apply coordinate transformation only (scaling handled in wireframe transformation)
+    marker_pos_in_object = coord_transform @ marker_pos_in_object
     
     # Get marker orientation relative to object center
     marker_rot = marker_relative_pose['rotation']
@@ -148,6 +149,63 @@ def euler_to_rotation_matrix(roll, pitch, yaw):
     
     # Combine rotations (order: Rz * Ry * Rx)
     return Rz @ Ry @ Rx
+
+def quat_to_rvec(quat):
+    """Convert quaternion to rotation vector"""
+    # Convert quaternion to rotation matrix
+    rotation_matrix = R.from_quat(quat).as_matrix()
+    # Convert rotation matrix to rotation vector
+    rvec, _ = cv2.Rodrigues(rotation_matrix)
+    return rvec
+
+def fuse_object_poses(object_poses, weights=None):
+    """
+    Fuse multiple object poses from different markers into a single stable pose.
+    """
+    if not object_poses:
+        return None, None
+    
+    if len(object_poses) == 1:
+        return object_poses[0]
+    
+    if weights is None:
+        weights = [1.0] * len(object_poses)
+    
+    # Normalize weights
+    total_weight = sum(weights)
+    weights = [w / total_weight for w in weights]
+    
+    # Fuse positions (weighted average)
+    fused_tvec = np.zeros(3)
+    for (tvec, _), weight in zip(object_poses, weights):
+        fused_tvec += tvec * weight
+    
+    # Fuse rotations using quaternion averaging
+    quaternions = []
+    for (_, rvec) in object_poses:
+        quat = rvec_to_quat(rvec)
+        quaternions.append(quat)
+    
+    # Weighted quaternion averaging
+    fused_quat = np.zeros(4)
+    for quat, weight in zip(quaternions, weights):
+        # Ensure quaternion is in the same hemisphere
+        if np.dot(fused_quat, quat) < 0:
+            quat = -quat
+        fused_quat += quat * weight
+    
+    # Normalize the fused quaternion
+    quat_norm = np.linalg.norm(fused_quat)
+    if quat_norm > 1e-8:  # Avoid division by zero
+        fused_quat = fused_quat / quat_norm
+    else:
+        # Fallback to identity quaternion if norm is too small
+        fused_quat = np.array([0, 0, 0, 1])
+    
+    # Convert back to rotation vector
+    fused_rvec = quat_to_rvec(fused_quat)
+    
+    return fused_tvec, fused_rvec
 
 def load_wireframe_data(json_file):
     """Load wireframe data from JSON file"""
@@ -204,45 +262,69 @@ def project_vertices_to_image(vertices, camera_matrix, dist_coeffs):
     return projected_points.reshape(-1, 2).astype(np.int32)
 
 def create_wireframe_mask(projected_vertices, edges, image_shape):
-    """Create a binary mask of the wireframe boundary"""
+    """Create a binary mask of the wireframe boundary with smart clipping"""
     mask = np.zeros(image_shape[:2], dtype=np.uint8)
     
     if len(projected_vertices) == 0:
         return mask
     
-    # Filter out vertices that are outside the image bounds
     height, width = image_shape[:2]
-    valid_vertices = []
-    valid_indices = []
     
-    for i, vertex in enumerate(projected_vertices):
+    # Check if too many vertices are outside the frame (object too close)
+    vertices_in_frame = 0
+    for vertex in projected_vertices:
         x, y = vertex
         if 0 <= x < width and 0 <= y < height:
-            valid_vertices.append(vertex)
-            valid_indices.append(i)
+            vertices_in_frame += 1
     
-    if len(valid_vertices) == 0:
+    # If less than 25% of vertices are in frame, don't render wireframe (object too close)
+    if vertices_in_frame < len(projected_vertices) * 0.25:
         return mask
     
-    # Create mapping from original indices to valid indices
-    index_map = {orig_idx: new_idx for new_idx, orig_idx in enumerate(valid_indices)}
+    # Apply smart clipping: scale down vertices that are outside the frame
+    clipped_vertices = []
+    for vertex in projected_vertices:
+        x, y = vertex
+        
+        # If vertex is outside frame, clip it to the nearest edge
+        if x < 0:
+            x = 0
+        elif x >= width:
+            x = width - 1
+            
+        if y < 0:
+            y = 0
+        elif y >= height:
+            y = height - 1
+            
+        clipped_vertices.append([x, y])
     
-    # Draw wireframe edges on mask
+    # Draw wireframe edges on mask using clipped vertices with thicker lines
     for edge in edges:
         if len(edge) >= 2:
             start_idx, end_idx = edge[0], edge[1]
-            if start_idx in index_map and end_idx in index_map:
-                start_point = tuple(valid_vertices[index_map[start_idx]])
-                end_point = tuple(valid_vertices[index_map[end_idx]])
-                cv2.line(mask, start_point, end_point, 255, 2)
+            if start_idx < len(clipped_vertices) and end_idx < len(clipped_vertices):
+                start_point = tuple(clipped_vertices[start_idx])
+                end_point = tuple(clipped_vertices[end_idx])
+                cv2.line(mask, start_point, end_point, 255, 4)  # Increased thickness for stability
     
-    # Fill the wireframe boundary to create a solid mask
-    # Find contours and fill them
+    # Apply strong morphological operations to stabilize the mask
+    kernel = np.ones((7, 7), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)  # Close gaps
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)   # Remove noise
+    
+    # Apply Gaussian blur to smooth edges and reduce flickering
+    mask = cv2.GaussianBlur(mask, (7, 7), 0)
+    mask = (mask > 127).astype(np.uint8) * 255  # Threshold back to binary
+    
+    # Find contours and fill them with much more conservative approach
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
-        # Fill the largest contour (main object boundary)
-        largest_contour = max(contours, key=cv2.contourArea)
-        cv2.fillPoly(mask, [largest_contour], 255)
+        # Sort contours by area and fill only the largest, most stable one
+        sorted_contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        # Only fill if the largest contour is substantial and stable
+        if len(sorted_contours) > 0 and cv2.contourArea(sorted_contours[0]) > 1000:  # Much higher threshold
+            cv2.fillPoly(mask, [sorted_contours[0]], 255)
     
     return mask
 
@@ -402,59 +484,77 @@ def main():
         estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
                     kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
 
-        # After estimating pose, collect marker world positions and convert to object poses
-        # Group detections by object type and select the best one per object
-        object_detections = {}  # {model_name: [detections]}
+        # After estimating pose, collect ALL confirmed markers and fuse them by object
+        object_detections = {}  # {model_name: [(object_tvec, object_rvec, distance, marker_id)]}
         
+        # Collect all confirmed markers and convert to object poses
         for marker_id in kalman_filters:
             if marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
-                tvec, rvec = kalman_filters[marker_id].predict()
-                rquat = rvec_to_quat(rvec)
+                # Toggle between raw measurements (default) and Kalman predictions
+                use_kalman_filter = False  # Set to True to use Kalman filter predictions
                 
-                # Get object pose from marker pose using correct estimation
+                if use_kalman_filter:
+                    tvec, rvec = kalman_filters[marker_id].predict()
+                else:
+                    tvec, rvec = kalman_filters[marker_id].get_raw_measurement()
+                
+                # Get object pose from marker pose
                 marker_annotation = marker_annotations[marker_id]['annotation']
                 object_tvec, object_rvec = estimate_object_pose_from_marker((tvec, rvec), marker_annotation)
-                object_quat = rvec_to_quat(object_rvec)
-                
-                # Convert object pose to world frame
-                object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
-                object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
                 
                 model_name = marker_annotations[marker_id]['model_name']
-                
-                # Calculate detection quality (distance from camera - closer is better)
                 distance = np.linalg.norm(object_tvec)
-                
-                detection = {
-                    "name": model_name,  # Use model name only, not marker ID
-                    "points": [object_pos_world],
-                    "position": object_pos_world,
-                    "quaternion": object_quat_world,
-                    'inferred': False,
-                    "distance": distance,
-                    "marker_id": marker_id,
-                    "object_tvec": object_tvec,
-                    "object_rvec": object_rvec
-                }
                 
                 # Group by object type
                 if model_name not in object_detections:
                     object_detections[model_name] = []
-                object_detections[model_name].append(detection)
+                object_detections[model_name].append((object_tvec, object_rvec, distance, marker_id))
         
-        # Select best detection per object (closest to camera)
+        # Fuse poses for each object using weighted averaging
         for model_name, detections in object_detections.items():
-            # Sort by distance (closest first)
-            best_detection = min(detections, key=lambda x: x["distance"])
+            if not detections:
+                continue
+                
+            # Extract poses and calculate weights (closer markers get higher weight)
+            object_poses = [(tvec, rvec) for tvec, rvec, _, _ in detections]
+            distances = [dist for _, _, dist, _ in detections]
+            marker_ids = [mid for _, _, _, mid in detections]
             
-            # Remove distance and marker_id from final object
-            final_object = {k: v for k, v in best_detection.items() if k not in ["distance", "marker_id", "object_tvec", "object_rvec"]}
-            identified_jenga.append(final_object)
+            # Calculate weights (inverse distance - closer markers get higher weight)
+            weights = [1.0 / (dist + 0.1) for dist in distances]  # Add small epsilon to avoid division by zero
             
-            if talk:
-                print(f"[{model_name}] Best detection (marker {best_detection['marker_id']}) - Distance: {best_detection['distance']:.3f}m")
-                print(f"  Pos: {best_detection['position']}")
-                print(f"  Quat: {best_detection['quaternion']}")
+            # Fuse poses
+            fused_tvec, fused_rvec = fuse_object_poses(object_poses, weights)
+            
+            # Check if fused pose is valid
+            if (fused_tvec is not None and fused_rvec is not None and 
+                not np.any(np.isnan(fused_tvec)) and not np.any(np.isnan(fused_rvec))):
+                # Use fused pose directly (simplified approach without object-level Kalman)
+                smoothed_tvec, smoothed_rvec = fused_tvec, fused_rvec
+                smoothed_quat = rvec_to_quat(smoothed_rvec)
+                
+                # Convert to world frame
+                object_pos_world = transform_point_cam_to_world(smoothed_tvec, cam_pos, cam_quat)
+                object_quat_world = transform_orientation_cam_to_world(smoothed_quat, cam_quat)
+                
+                # Create final object
+                final_object = {
+                    "name": model_name,
+                    "points": [object_pos_world],
+                    "position": object_pos_world,
+                    "quaternion": object_quat_world,
+                    'inferred': False,
+                    "object_tvec": smoothed_tvec,
+                    "object_rvec": smoothed_rvec
+                }
+                identified_jenga.append(final_object)
+                
+                if talk:
+                    avg_distance = np.mean(distances)
+                    print(f"[{model_name}] Fused from {len(detections)} markers - Avg distance: {avg_distance:.3f}m")
+                    print(f"  Pos: {object_pos_world}")
+                    print(f"  Quat: {object_quat_world}")
+                    print(f"  Markers: {marker_ids}")
 
         objects = identified_jenga + detected_objects
 
@@ -483,18 +583,28 @@ def main():
                 wireframe_vertices = model_data[model_name]['wireframe_vertices']
                 wireframe_edges = model_data[model_name]['wireframe_edges']
                 
+                # Debug: Show pose values for line_red_scaled70
+                if model_name == "line_red_scaled70" and talk:
+                    print(f"DEBUG {model_name}: Object pose in camera frame:")
+                    print(f"  Position: {object_pos_cam}")
+                    print(f"  Rotation: {object_rvec.flatten()}")
+                
                 transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
                 projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS)
                 
-                # Create wireframe mask
-                wireframe_mask = create_wireframe_mask(projected_vertices, wireframe_edges, frame.shape)
+                # Debug: Show projected vertices for line_red_scaled70
+                if model_name == "line_red_scaled70" and talk:
+                    print(f"  Projected vertices range: X=[{projected_vertices[:, 0].min():.1f}, {projected_vertices[:, 0].max():.1f}], Y=[{projected_vertices[:, 1].min():.1f}, {projected_vertices[:, 1].max():.1f}]")
                 
-                # Show wireframe mask overlay
-                if wireframe_mask is not None:
-                    # Create a colored overlay to show the wireframe mask
-                    mask_overlay = np.zeros_like(frame)
-                    mask_overlay[wireframe_mask > 0] = [0, 255, 0]  # Green overlay
-                    frame = cv2.addWeighted(frame, 0.8, mask_overlay, 0.2, 0)
+                # Draw wireframe lines directly on the frame (no mask needed)
+                for edge in wireframe_edges:
+                    if len(edge) >= 2:
+                        start_idx, end_idx = edge[0], edge[1]
+                        if start_idx < len(projected_vertices) and end_idx < len(projected_vertices):
+                            start_point = tuple(projected_vertices[start_idx])
+                            end_point = tuple(projected_vertices[end_idx])
+                            # Draw green wireframe lines directly
+                            cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
 
         # Blue Blob Section
         world_points, _ = detect_color_blobs(frame, blue_range, (255,0,0), CAMERA_MATRIX, cam_pos, cam_quat)
