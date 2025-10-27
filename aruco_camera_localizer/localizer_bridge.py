@@ -13,7 +13,7 @@ class LocalizerBridge(Node):
     def __init__(self, image_topic=None):
         super().__init__('localizer_bridge')
         # Offset of camera from EE (in EE frame)
-        self.cam_offset_position = np.array([-0.012, -0.048, -0.01]) # meters
+        self.cam_offset_position = np.array([-0.012, -0.048, -0.1]) # meters
         self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
         self.ee_position = np.array([-0.144, -0.435, 0.202])
@@ -176,8 +176,8 @@ class LocalizerBridge(Node):
                     grasp_point['position']['z']
                 ])
                 
-                # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
-                grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
+                # Apply coordinate system transformation (same as wireframe)
+                grasp_pos_transformed = coord_transform @ grasp_pos_local
                 
                 # Transform to world frame
                 grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed

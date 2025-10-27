@@ -171,8 +171,8 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
                 grasp_point['position']['z']
             ])
             
-            # Apply coordinate system transformation and scaling (same as wireframe: 1.25x)
-            grasp_pos_transformed = coord_transform @ (grasp_pos_local * 1.25)
+            # Apply coordinate system transformation (same as wireframe)
+            grasp_pos_transformed = coord_transform @ grasp_pos_local
             
             # Transform to world frame
             grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed

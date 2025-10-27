@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-transform_points_world_to_img, transform_point_world_to_cam
+transform_points_world_to_img, transform_point_world_to_cam, slerp_quat
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
@@ -30,10 +30,15 @@ CAMERA_MATRIX = np.array([[fx, 0, c_width / 2],
                           [0, fy, c_height / 2],
                           [0, 0, 1]], dtype=np.float32)
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.021  # meters - from aruco_localizer
-BLOCK_LENGTH = 0.072 # meters
-BLOCK_WIDTH = 0.024 # meters
-BLOCK_THICKNESS = 0.014 # meters
+# Marker dimensions
+marker_size_mm = 21  # total marker size in mm
+border_width_percent = 5  # white border percentage
+
+# Calculate actual ArUco pattern size
+MARKER_SIZE = marker_size_mm / 1000.0  # Convert to meters (21mm = 0.021m)
+white_border_mm = marker_size_mm * (border_width_percent / 100.0)  # 5% of 21mm = 1.05mm
+BORDER_WIDTH = white_border_mm / 1000.0  # Convert to meters (1.05mm = 0.00105m)
+TOTAL_MARKER_SIZE = MARKER_SIZE - 2 * BORDER_WIDTH  # Actual ArUco pattern size
 ARUCO_DICTS = {
     "DICT_4X4_50": aruco.DICT_4X4_50,
     # "DICT_5X5_250": aruco.DICT_5X5_250
@@ -94,7 +99,7 @@ def estimate_object_pose_from_marker(marker_pose, aruco_annotation):
         marker_relative_pose['position']['z']
     ])
     
-    # Apply coordinate transformation only (scaling handled in wireframe transformation)
+    # Apply coordinate transformation
     marker_pos_in_object = coord_transform @ marker_pos_in_object
     
     # Get marker orientation relative to object center
@@ -224,8 +229,8 @@ def transform_mesh_to_camera_frame(vertices, object_pose):
     # Transform vertices from object center frame to camera frame
     transformed_vertices = []
     for vertex in vertices:
-        # Apply coordinate system transformation and scaling
-        vertex_transformed = coord_transform @ (np.array(vertex) * 1.25)
+        # Apply coordinate system transformation
+        vertex_transformed = coord_transform @ np.array(vertex)
         
         # Transform from object frame to camera frame
         vertex_cam = rotation_matrix @ vertex_transformed + object_tvec
@@ -233,14 +238,38 @@ def transform_mesh_to_camera_frame(vertices, object_pose):
     
     return np.array(transformed_vertices)
 
-def project_vertices_to_image(vertices, camera_matrix, dist_coeffs):
-    """Project 3D vertices to 2D image coordinates"""
+def calculate_scale_factor_from_aruco(corners, marker_size):
+    """Calculate scale factor from ArUco marker pixel size"""
+    if not corners:
+        return 1.0
+    
+    # Calculate pixel size of the first detected marker
+    corner = corners[0][0]  # First marker, first corner set
+    # Calculate side length in pixels
+    side1 = np.linalg.norm(corner[0] - corner[1])  # Top side
+    side2 = np.linalg.norm(corner[1] - corner[2])  # Right side
+    side3 = np.linalg.norm(corner[2] - corner[3])  # Bottom side
+    side4 = np.linalg.norm(corner[3] - corner[0])  # Left side
+    
+    # Average side length in pixels
+    avg_pixel_size = (side1 + side2 + side3 + side4) / 4.0
+    
+    # Scale factor = physical_size / pixel_size
+    scale_factor = marker_size / avg_pixel_size
+    
+    return scale_factor
+
+def project_vertices_to_image(vertices, camera_matrix, dist_coeffs, scale_factor=1.0):
+    """Project 3D vertices to 2D image coordinates with scale factor"""
     if len(vertices) == 0:
         return np.array([])
     
+    # Apply scale factor to vertices
+    scaled_vertices = vertices * scale_factor
+    
     # Project points to image plane
     projected_points, _ = cv2.projectPoints(
-        vertices.astype(np.float32), 
+        scaled_vertices.astype(np.float32), 
         np.zeros((3, 1)),  # No rotation (already in camera frame)
         np.zeros((3, 1)),  # No translation (already in camera frame)
         camera_matrix, 
@@ -427,6 +456,12 @@ def main():
     marker_stabilities = {}
     last_seen_frames = {}
     frame_idx = 0
+    
+    # Temporal smoothing for fused object poses
+    object_pose_history = {}  # {model_name: {'tvec': prev_tvec, 'rvec': prev_rvec}}
+    smoothing_alpha = 0.1  # Smoothing factor (0.1 = 10% new, 90% old)
+    # Higher values = more responsive to changes, lower values = more stable
+    # Recommended range: 0.05-0.2 (0.05 = very stable, 0.2 = more responsive)
 
     # Determine input source
     use_ros_topic = args.image_topic is not None
@@ -493,8 +528,12 @@ def main():
 
         # Aruco Section - Now using aruco_localizer objects
         corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
-        estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
+        estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, TOTAL_MARKER_SIZE,
                     kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
+        
+        
+        # Calculate scale factor from ArUco marker detection
+        scale_factor = calculate_scale_factor_from_aruco(corners, TOTAL_MARKER_SIZE)
 
         # After estimating pose, collect ALL confirmed markers and fuse them by object
         object_detections = {}  # {model_name: [(object_tvec, object_rvec, distance, marker_id)]}
@@ -541,8 +580,29 @@ def main():
             # Check if fused pose is valid
             if (fused_tvec is not None and fused_rvec is not None and 
                 not np.any(np.isnan(fused_tvec)) and not np.any(np.isnan(fused_rvec))):
-                # Use fused pose directly (simplified approach without object-level Kalman)
-                smoothed_tvec, smoothed_rvec = fused_tvec, fused_rvec
+                
+                # Apply temporal smoothing to fused pose
+                if model_name in object_pose_history:
+                    prev_tvec = object_pose_history[model_name]['tvec']
+                    prev_rvec = object_pose_history[model_name]['rvec']
+                    
+                    # Smooth position (linear interpolation)
+                    smoothed_tvec = smoothing_alpha * fused_tvec + (1 - smoothing_alpha) * prev_tvec
+                    
+                    # Smooth rotation (quaternion slerp)
+                    fused_quat = rvec_to_quat(fused_rvec)
+                    prev_quat = rvec_to_quat(prev_rvec)
+                    smoothed_quat = slerp_quat(prev_quat, fused_quat, smoothing_alpha)
+                    smoothed_rvec = quat_to_rvec(smoothed_quat)
+                else:
+                    # First detection - use fused pose directly
+                    smoothed_tvec, smoothed_rvec = fused_tvec, fused_rvec
+                
+                # Update pose history for next frame
+                object_pose_history[model_name] = {
+                    'tvec': smoothed_tvec.copy(),
+                    'rvec': smoothed_rvec.copy()
+                }
                 smoothed_quat = rvec_to_quat(smoothed_rvec)
                 
                 # Convert to world frame
@@ -561,7 +621,7 @@ def main():
                 }
                 identified_jenga.append(final_object)
                 
-                if talk:
+                if talk and frame_idx % 30 == 0:  # Only print every 30 frames
                     avg_distance = np.mean(distances)
                     print(f"[{model_name}] Fused from {len(detections)} markers - Avg distance: {avg_distance:.3f}m")
                     print(f"  Pos: {object_pos_world}")
@@ -602,7 +662,7 @@ def main():
                     print(f"  Rotation: {object_rvec.flatten()}")
                 
                 transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
-                projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS)
+                projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS, scale_factor)
                 
                 # Debug: Show projected vertices for line_red_scaled70
                 if model_name == "line_red_scaled70" and talk:

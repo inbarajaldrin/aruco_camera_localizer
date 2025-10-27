@@ -20,7 +20,6 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
-
 def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, height=0.01, min_area=120, merge_threshold=0.02):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     
@@ -84,6 +83,11 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
     max_movement = 0.10  # meters - increased for more tolerance
     hold_required = 3    # frames it must persist - reduced for faster confirmation
     half_size = marker_size / 2
+    
+    # Static counter to reduce debug output frequency
+    if not hasattr(estimate_pose, 'debug_counter'):
+        estimate_pose.debug_counter = 0
+    estimate_pose.debug_counter += 1
 
     if corners and ids:
         for corner, marker_id in zip(corners, ids):
@@ -144,10 +148,10 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     # Convert to world frame
                     marker_pos_world = transform_point_cam_to_world(corrected_tvec, cam_pos, cam_quat)
                     marker_quat_world = transform_orientation_cam_to_world(corrected_quat, cam_quat)
-                    if talk:
-                        print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
-                        print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
-                elif talk:
+                if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
+                    print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
+                    print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
+                elif talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
                     print(f"[{marker_id}] Holding: t={tvec_flat}, hold={stability['hold_counter']}")
 
 
@@ -166,7 +170,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                 pred_quat = rvec_to_quat(pred_rvec)
                 marker_pos_world = transform_point_cam_to_world(pred_tvec, cam_pos, cam_quat)
                 marker_quat_world = transform_orientation_cam_to_world(pred_quat, cam_quat)
-                if talk:
+                if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
                     print(f"[{marker_id}] Ghost: t={pred_tvec}, r={pred_rvec}")
                     print(f"[{marker_id}] GHOST WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
         else:
