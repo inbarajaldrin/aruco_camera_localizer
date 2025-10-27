@@ -124,6 +124,13 @@ class LocalizerBridge(Node):
             object_pose.pose.orientation.z = obj["quaternion"][2]
             object_pose.pose.orientation.w = obj["quaternion"][3]
             
+            # Convert quaternion to RPY degrees
+            quat = obj["quaternion"]
+            euler = R.from_quat(quat).as_euler('xyz', degrees=True)
+            object_pose.roll = float(euler[0])
+            object_pose.pitch = float(euler[1])
+            object_pose.yaw = float(euler[2])
+            
             msg.objects.append(object_pose)
         
         # Publish the structured message
@@ -183,12 +190,12 @@ class LocalizerBridge(Node):
                 grasp_msg.grasp_id = grasp_point['id']
                 grasp_msg.grasp_type = grasp_point.get('type', 'unknown')
                 
-                # Set position in world frame
-                grasp_msg.position.x = float(grasp_pos_world[0])
-                grasp_msg.position.y = float(grasp_pos_world[1])
-                grasp_msg.position.z = float(grasp_pos_world[2])
+                # Set pose (position and orientation)
+                grasp_msg.pose.position.x = float(grasp_pos_world[0])
+                grasp_msg.pose.position.y = float(grasp_pos_world[1])
+                grasp_msg.pose.position.z = float(grasp_pos_world[2])
                 
-                # Set approach vector (transform to world frame)
+                # Generate orientation from approach vector if available
                 if 'approach_vector' in grasp_point:
                     approach_vec_local = np.array([
                         grasp_point['approach_vector']['x'],
@@ -202,14 +209,46 @@ class LocalizerBridge(Node):
                     # Transform approach vector to world frame
                     approach_vec_world = rot_matrix @ approach_vec_transformed
                     
-                    grasp_msg.approach_vector.x = float(approach_vec_world[0])
-                    grasp_msg.approach_vector.y = float(approach_vec_world[1])
-                    grasp_msg.approach_vector.z = float(approach_vec_world[2])
+                    # Generate full orientation from approach vector
+                    # The approach vector becomes the Z-axis of the gripper frame
+                    z_axis = approach_vec_world / np.linalg.norm(approach_vec_world)
+                    
+                    # Create a perpendicular vector for X-axis (gripper opening direction)
+                    # Use a default direction and make it perpendicular to approach vector
+                    if abs(z_axis[0]) < 0.9:  # If not pointing along X
+                        x_axis = np.array([1.0, 0.0, 0.0])
+                    else:  # If pointing along X, use Y as reference
+                        x_axis = np.array([0.0, 1.0, 0.0])
+                    
+                    # Make X-axis perpendicular to Z-axis
+                    x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
+                    x_axis = x_axis / np.linalg.norm(x_axis)
+                    
+                    # Y-axis is cross product of Z and X
+                    y_axis = np.cross(z_axis, x_axis)
+                    y_axis = y_axis / np.linalg.norm(y_axis)
+                    
+                    # Construct rotation matrix
+                    rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
+                    
+                    # Convert to quaternion
+                    grasp_quat = R.from_matrix(rotation_matrix).as_quat()
+                    
                 else:
-                    # Default approach vector (upward)
-                    grasp_msg.approach_vector.x = 0.0
-                    grasp_msg.approach_vector.y = 0.0
-                    grasp_msg.approach_vector.z = 1.0
+                    # Default orientation (identity)
+                    grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                
+                # Set orientation in world frame
+                grasp_msg.pose.orientation.x = float(grasp_quat[0])
+                grasp_msg.pose.orientation.y = float(grasp_quat[1])
+                grasp_msg.pose.orientation.z = float(grasp_quat[2])
+                grasp_msg.pose.orientation.w = float(grasp_quat[3])
+                
+                # Convert quaternion to RPY degrees (same as object poses)
+                grasp_euler = R.from_quat(grasp_quat).as_euler('xyz', degrees=True)
+                grasp_msg.roll = float(grasp_euler[0])
+                grasp_msg.pitch = float(grasp_euler[1])
+                grasp_msg.yaw = float(grasp_euler[2])
                 
                 msg.grasp_points.append(grasp_msg)
         
