@@ -1,10 +1,11 @@
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, Point
+from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, Point, TransformStamped, Transform
 from std_msgs.msg import Header, ColorRGBA, Int32
 from sensor_msgs.msg import Image
+from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
-from max_camera_msgs.msg import PusherInfo, ObjectPose, ObjectPoseArray, GraspPoint, GraspPointArray
+from max_camera_msgs.msg import PusherInfo, GraspPoint, GraspPointArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import threading
@@ -44,8 +45,8 @@ class LocalizerBridge(Node):
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
         self.bridge = CvBridge()
         
-        # Clean approach: Single topic with proper structured data (same as max_camera_localizer)
-        self.object_poses_pub = self.create_publisher(ObjectPoseArray, '/objects_poses', 10)
+        # Use TF2 message for object poses
+        self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses_real', 10)
         
         # Grasp points publisher
         self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points', 10)
@@ -100,40 +101,33 @@ class LocalizerBridge(Node):
         self.cam_pose_pub.publish(msg)
 
     def publish_object_poses(self, object_data):
-        """Publish all object poses in a single structured topic (same as max_camera_localizer)"""
+        """Publish all object poses using TF2 message format - much cleaner than custom messages"""
         now = self.get_clock().now().to_msg()
         
-        # Create ObjectPoseArray message
-        msg = ObjectPoseArray()
-        msg.header.stamp = now
-        msg.header.frame_id = "base"
+        # Create TFMessage with all object transforms
+        msg = TFMessage()
         
-        # Add each object as an ObjectPose
+        # Add each object as a TransformStamped
         for obj in object_data:
-            object_pose = ObjectPose()
-            object_pose.header.stamp = now
-            object_pose.header.frame_id = "base"
-            object_pose.object_name = obj["name"]
+            transform = TransformStamped()
+            transform.header.stamp = now
+            transform.header.frame_id = "World"  # Parent frame
+            transform.child_frame_id = obj["name"]  # Object name as child frame
             
-            # Set pose
-            object_pose.pose.position.x = obj["position"][0]
-            object_pose.pose.position.y = obj["position"][1]
-            object_pose.pose.position.z = obj["position"][2]
-            object_pose.pose.orientation.x = obj["quaternion"][0]
-            object_pose.pose.orientation.y = obj["quaternion"][1]
-            object_pose.pose.orientation.z = obj["quaternion"][2]
-            object_pose.pose.orientation.w = obj["quaternion"][3]
+            # Set translation
+            transform.transform.translation.x = float(obj["position"][0])
+            transform.transform.translation.y = float(obj["position"][1])
+            transform.transform.translation.z = float(obj["position"][2])
             
-            # Convert quaternion to RPY degrees
-            quat = obj["quaternion"]
-            euler = R.from_quat(quat).as_euler('xyz', degrees=True)
-            object_pose.roll = float(euler[0])
-            object_pose.pitch = float(euler[1])
-            object_pose.yaw = float(euler[2])
+            # Set rotation (quaternion)
+            transform.transform.rotation.x = float(obj["quaternion"][0])
+            transform.transform.rotation.y = float(obj["quaternion"][1])
+            transform.transform.rotation.z = float(obj["quaternion"][2])
+            transform.transform.rotation.w = float(obj["quaternion"][3])
             
-            msg.objects.append(object_pose)
+            msg.transforms.append(transform)
         
-        # Publish the structured message
+        # Publish the TF2 message
         self.object_poses_pub.publish(msg)
 
     def publish_grasp_points(self, identified_objects, model_data):

@@ -148,9 +148,10 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     # Convert to world frame
                     marker_pos_world = transform_point_cam_to_world(corrected_tvec, cam_pos, cam_quat)
                     marker_quat_world = transform_orientation_cam_to_world(corrected_quat, cam_quat)
-                if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
-                    print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
-                    print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
+                    
+                    if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
+                        print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
+                        print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
                 elif talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
                     print(f"[{marker_id}] Holding: t={tvec_flat}, hold={stability['hold_counter']}")
 
