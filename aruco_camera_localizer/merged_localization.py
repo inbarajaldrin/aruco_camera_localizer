@@ -688,6 +688,9 @@ def main():
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
         draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
 
+        # Publish the annotated frame (what shows up in OpenCV window)
+        bridge_node.publish_annotated_stream(frame)
+
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

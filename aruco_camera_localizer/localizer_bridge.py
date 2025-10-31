@@ -23,6 +23,7 @@ class LocalizerBridge(Node):
         self.image_lock = threading.Lock()
         self.latest_frame = None
         self.frame_available = False
+        self.use_image_topic = image_topic is not None
         
         self.subscription = self.create_subscription(
             PoseStamped,
@@ -43,6 +44,7 @@ class LocalizerBridge(Node):
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
         self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
+        self.annotated_stream_pub = self.create_publisher(Image, 'annotated_stream', 10)
         self.bridge = CvBridge()
         
         # Use TF2 message for object poses
@@ -55,8 +57,15 @@ class LocalizerBridge(Node):
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
 
     def publish_image(self, frame):
-        img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
-        self.image_publisher.publish(img_msg)
+        """Publish raw camera image only when not using an image topic"""
+        if not self.use_image_topic:
+            img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
+            self.image_publisher.publish(img_msg)
+
+    def publish_annotated_stream(self, annotated_frame):
+        """Publish the annotated frame that shows up in the OpenCV window"""
+        img_msg = self.bridge.cv2_to_imgmsg(annotated_frame, "bgr8")
+        self.annotated_stream_pub.publish(img_msg)
 
     def image_callback(self, msg: Image):
         """Callback for incoming image messages"""
