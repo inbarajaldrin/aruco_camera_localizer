@@ -1,7 +1,7 @@
 {
-  "object_name": "fork_yellow_scaled70",
-  "display_name": "Fork Yellow Scaled70",
-  "source_marker_id": 11,
+  "object_name": "fork_orange",
+  "display_name": "Fork Orange",
+  "source_marker_id": 5,
   "object_thickness": 0.020999999046325685,
   "total_grasp_points": 9,
   "coordinate_frame": "cad_center",
@@ -1204,7 +1204,7 @@
   },
   "markers": [
     {
-      "aruco_id": 6,
+      "aruco_id": 0,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -1220,7 +1220,7 @@
       }
     },
     {
-      "aruco_id": 7,
+      "aruco_id": 1,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -1236,7 +1236,7 @@
       }
     },
     {
-      "aruco_id": 8,
+      "aruco_id": 2,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -1252,7 +1252,7 @@
       }
     },
     {
-      "aruco_id": 9,
+      "aruco_id": 3,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -1268,7 +1268,7 @@
       }
     },
     {
-      "aruco_id": 10,
+      "aruco_id": 4,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -1284,7 +1284,7 @@
       }
     },
     {
-      "aruco_id": 11,
+      "aruco_id": 5,
       "size": 0.021,
       "pose_absolute": {
         "position": {

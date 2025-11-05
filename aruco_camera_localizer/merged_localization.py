@@ -655,8 +655,8 @@ def main():
                 wireframe_vertices = model_data[model_name]['wireframe_vertices']
                 wireframe_edges = model_data[model_name]['wireframe_edges']
                 
-                # Debug: Show pose values for line_red_scaled70
-                if model_name == "line_red_scaled70" and talk:
+                # Debug: Show pose values for line_red
+                if model_name == "line_red" and talk:
                     print(f"DEBUG {model_name}: Object pose in camera frame:")
                     print(f"  Position: {object_pos_cam}")
                     print(f"  Rotation: {object_rvec.flatten()}")
@@ -664,8 +664,8 @@ def main():
                 transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
                 projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS, scale_factor)
                 
-                # Debug: Show projected vertices for line_red_scaled70
-                if model_name == "line_red_scaled70" and talk:
+                # Debug: Show projected vertices for line_red
+                if model_name == "line_red" and talk:
                     print(f"  Projected vertices range: X=[{projected_vertices[:, 0].min():.1f}, {projected_vertices[:, 0].max():.1f}], Y=[{projected_vertices[:, 1].min():.1f}, {projected_vertices[:, 1].max():.1f}]")
                 
                 # Draw wireframe lines directly on the frame (no mask needed)

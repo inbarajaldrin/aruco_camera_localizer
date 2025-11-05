@@ -1,7 +1,7 @@
 {
-  "object_name": "line_red_scaled70",
-  "display_name": "Line Red Scaled70",
-  "source_marker_id": 17,
+  "object_name": "line_brown",
+  "display_name": "Line Brown",
+  "source_marker_id": 22,
   "object_thickness": 0.025899999141693116,
   "total_grasp_points": 1,
   "coordinate_frame": "cad_center",
@@ -404,7 +404,7 @@
   },
   "markers": [
     {
-      "aruco_id": 12,
+      "aruco_id": 18,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -420,7 +420,7 @@
       }
     },
     {
-      "aruco_id": 13,
+      "aruco_id": 19,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -436,7 +436,7 @@
       }
     },
     {
-      "aruco_id": 14,
+      "aruco_id": 20,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -452,7 +452,7 @@
       }
     },
     {
-      "aruco_id": 15,
+      "aruco_id": 21,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -468,7 +468,7 @@
       }
     },
     {
-      "aruco_id": 16,
+      "aruco_id": 22,
       "size": 0.021,
       "pose_absolute": {
         "position": {
@@ -484,7 +484,7 @@
       }
     },
     {
-      "aruco_id": 17,
+      "aruco_id": 23,
       "size": 0.021,
       "pose_absolute": {
         "position": {
