@@ -459,7 +459,7 @@ def main():
     
     # Temporal smoothing for fused object poses
     object_pose_history = {}  # {model_name: {'tvec': prev_tvec, 'rvec': prev_rvec}}
-    smoothing_alpha = 0.1  # Smoothing factor (0.1 = 10% new, 90% old)
+    smoothing_alpha = 0.5  # Smoothing factor (0.5 = 50% new, 50% old)
     # Higher values = more responsive to changes, lower values = more stable
     # Recommended range: 0.05-0.2 (0.05 = very stable, 0.2 = more responsive)
 
