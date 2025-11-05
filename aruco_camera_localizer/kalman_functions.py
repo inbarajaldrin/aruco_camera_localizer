@@ -21,8 +21,11 @@ class QuaternionKalman:
 
         # Process noise covariance (Q). Lower Values = More Inertia
         self.kf.processNoiseCov = np.eye(10, dtype=np.float32) * 1e-5
-        for i in range(3):   # x, y, z - position uncertainty (even lower for maximum stability)
-            self.kf.processNoiseCov[i, i] = 1e-8  # Reduced from 1e-6 to 1e-8
+        # X and Y are stable
+        self.kf.processNoiseCov[0, 0] = 1e-8  # X position
+        self.kf.processNoiseCov[1, 1] = 1e-8  # Y position
+        # Z is much more uncertain in process model
+        self.kf.processNoiseCov[2, 2] = 1e-4  # Z position - much higher uncertainty
         for i in range(3, 7):  # quaternion x, y, z, w - orientation uncertainty
             self.kf.processNoiseCov[i, i] = 1e-2
         for i in range(7, 10):  # vx, vy, vz - velocity uncertainty
@@ -31,8 +34,10 @@ class QuaternionKalman:
 
         # Measurement noise covariance (R). Lower Values = More Trust = You have good cameras
         self.kf.measurementNoiseCov = np.eye(7, dtype=np.float32)
-        for i in range(3):   # position - trust measurements much more
-            self.kf.measurementNoiseCov[i, i] = 1e-4  # Reduced from 1e-3 to 1e-4
+        # Anisotropic noise: X,Y are stable but Z (depth) is very noisy in monocular vision
+        self.kf.measurementNoiseCov[0, 0] = 1e-4  # X position - stable
+        self.kf.measurementNoiseCov[1, 1] = 1e-4  # Y position - stable  
+        self.kf.measurementNoiseCov[2, 2] = 5e-1  # Z position - 5000x noisier (EXTREMELY aggressive)
         for i in range(3, 7):  # quaternion - orientation measurements are less reliable
             self.kf.measurementNoiseCov[i, i] = 1e-2
         
@@ -47,8 +52,33 @@ class QuaternionKalman:
         self.last_measurement_tvec = tvec.copy()
         self.last_measurement_rvec = rvec.copy()
         
+        # Get current Z state without advancing the filter
+        current_z = self.kf.statePost[2, 0]
+        
+        # Outlier rejection for Z: reject measurements that are too far from current state
+        z_error = abs(tvec[2] - current_z) if current_z != 0 else 0
+        outlier_threshold = 0.05  # Reject Z measurements more than 25mm from current state
+        
+        if z_error > outlier_threshold and current_z != 0:
+            # Outlier detected - use current state instead of measurement
+            smoothed_tvec = tvec.copy()
+            smoothed_tvec[2] = current_z
+        else:
+            # Apply exponential smoothing to Z only
+            # Very aggressive exponential smoothing - only trust 2% of new measurement
+            alpha = 0.02  # Only trust 2% of new Z measurement (98% from current state)
+            if current_z == 0:
+                # First measurement - use it directly
+                smoothed_z = tvec[2]
+            else:
+                smoothed_z = alpha * tvec[2] + (1 - alpha) * current_z
+            
+            # Create smoothed tvec with exponential smoothing on Z
+            smoothed_tvec = tvec.copy()
+            smoothed_tvec[2] = smoothed_z
+        
         quat = rvec_to_quat(rvec)
-        measurement = np.vstack((tvec.reshape(3, 1), np.array(quat).reshape(4, 1))).astype(np.float32)
+        measurement = np.vstack((smoothed_tvec.reshape(3, 1), np.array(quat).reshape(4, 1))).astype(np.float32)
         self.kf.correct(measurement)
 
     def predict(self):
