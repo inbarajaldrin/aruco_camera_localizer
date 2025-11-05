@@ -15,13 +15,13 @@ class LocalizerBridge(Node):
         super().__init__('localizer_bridge')
         # Offset of camera from EE (in EE frame)
         self.cam_offset_position = np.array([-0.012, -0.048, -0.1]) # meters
-        self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
+        self.cam_offset_quat = np.array([0.0, 1.0, 0.0, 0.0]) # 180° around Y to compensate for EE rotation
         
         # Object pose correction offsets (X and Y offsets to account for real vs simulated differences)
         # Based on measurements: fork_orange (X=11.8mm, Y=6.7mm), line_brown (X=11.5mm, Y=7.2mm)
         # Average: X=11.66mm, Y=6.96mm. Using rounded values:
         # sim_offset: applied when using image topic (simulated environment)
-        self.sim_offset = np.array([-0.0118, -0.0070, 0.0]) # meters (X, Y offsets, Z=0 to leave height unchanged)
+        self.sim_offset = np.array([-0.017100, -0.002278, -0.693310]) # meters (X, Y offsets, Z=0 to leave height unchanged)
         # real_world_offset: applied when using real world camera (no image topic)
         # Set to zero since real world measurements are already correct
         self.real_world_offset = np.array([0.0, 0.0, 0.0]) # meters
@@ -149,7 +149,7 @@ class LocalizerBridge(Node):
             transform.transform.translation.y = float(corrected_position[1])
             transform.transform.translation.z = float(corrected_position[2])
             
-            # Set rotation (quaternion)
+            # Set rotation (quaternion) - no correction needed, cam_offset_quat handles it
             transform.transform.rotation.x = float(obj["quaternion"][0])
             transform.transform.rotation.y = float(obj["quaternion"][1])
             transform.transform.rotation.z = float(obj["quaternion"][2])
