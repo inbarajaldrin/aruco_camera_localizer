@@ -80,9 +80,24 @@ def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_qu
 
 def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                   kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, talk=True):
-    max_movement = 0.10  # meters - increased for more tolerance
-    hold_required = 3    # frames it must persist - reduced for faster confirmation
+    max_movement = 0.023  # meters - 30mm threshold for overall movement
+    max_rotation = 0.1   # radians - ~11 degrees threshold for rotation changes
+    hold_required = 2    # frames it must persist - reduced for faster confirmation
     half_size = marker_size / 2
+    
+    # Validate camera pose (if it's wrong, all transformations will be wrong)
+    if cam_pos is None or cam_quat is None:
+        return  # Skip processing if camera pose is not available
+    if np.any(np.isnan(cam_pos)) or np.any(np.isinf(cam_pos)) or np.any(np.isnan(cam_quat)) or np.any(np.isinf(cam_quat)):
+        if talk and estimate_pose.debug_counter % 30 == 0:
+            print(f"WARNING: Invalid camera pose - pos: {cam_pos}, quat: {cam_quat}")
+        return  # Skip processing if camera pose is invalid
+    
+    # Check if camera Z is reasonable (should be around 0-1m for tabletop setup)
+    if abs(cam_pos[2]) > 2.0:  # Camera Z should be reasonable
+        if talk and estimate_pose.debug_counter % 30 == 0:
+            print(f"WARNING: Camera Z out of range: {cam_pos[2]:.3f}m - pos: {cam_pos}, quat: {cam_quat}")
+        return  # Skip processing if camera pose is unreasonable
     
     # Static counter to reduce debug output frequency
     if not hasattr(estimate_pose, 'debug_counter'):
@@ -98,6 +113,8 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                 kalman_filters[marker_id] = QuaternionKalman()
                 marker_stabilities[marker_id] = {
                     "last_tvec": None,
+                    "confirmed_tvec": None,  # Only updated after confirmation
+                    "confirmed_rvec": None,  # Only updated after confirmation
                     "last_frame": -1,
                     "confirmed": False,
                     "hold_counter": 0
@@ -118,19 +135,68 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
             success, rvec, tvec = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs)
             if success:
                 tvec_flat = tvec.flatten()
-                distance = np.linalg.norm(tvec_flat - stability["last_tvec"]) if stability["last_tvec"] is not None else 0
-                movement_ok = distance < max_movement
-
-                if movement_ok:
-                    stability["hold_counter"] += 1
-                else:
-                    stability["hold_counter"] = 0
-
+                
+                # Always validate Z-range (not just first measurement)
+                min_z = 0.05  # Minimum depth: 5cm
+                max_z = 2.0   # Maximum depth: 2m
+                if tvec_flat[2] < min_z or tvec_flat[2] > max_z:
+                    # Outlier: Z out of reasonable range
+                    if talk and estimate_pose.debug_counter % 30 == 0:
+                        print(f"[{marker_id}] Outlier: Z={tvec_flat[2]:.3f}m out of range [{min_z:.3f}, {max_z:.3f}]")
+                    continue
+                
+                # Reject outliers if movement or rotation is too large (only compare against confirmed measurements)
+                if stability.get("confirmed_tvec") is not None and stability.get("confirmed_rvec") is not None:
+                    # Check position change
+                    distance = np.linalg.norm(tvec_flat - stability["confirmed_tvec"])
+                    if distance > max_movement:
+                        # Outlier: movement too large, skip this measurement
+                        if talk and estimate_pose.debug_counter % 30 == 0:
+                            print(f"[{marker_id}] Outlier: movement={distance*1000:.1f}mm > {max_movement*1000:.1f}mm")
+                        continue
+                    
+                    # Check rotation change
+                    # Convert rotation vectors to rotation matrices
+                    R_current, _ = cv2.Rodrigues(rvec)
+                    R_confirmed, _ = cv2.Rodrigues(stability["confirmed_rvec"])
+                    # Compute relative rotation: R_relative = R_current @ R_confirmed.T
+                    R_relative = R_current @ R_confirmed.T
+                    # Convert back to rotation vector
+                    rvec_relative, _ = cv2.Rodrigues(R_relative)
+                    rotation_angle = np.linalg.norm(rvec_relative)
+                    
+                    if rotation_angle > max_rotation:
+                        # Outlier: rotation too large, skip this measurement
+                        if talk and estimate_pose.debug_counter % 30 == 0:
+                            print(f"[{marker_id}] Outlier: rotation={np.degrees(rotation_angle):.1f}° > {np.degrees(max_rotation):.1f}°")
+                        continue
+                
+                # Update last tvec and increment hold counter
                 stability["last_tvec"] = tvec_flat
                 stability["last_frame"] = current_frame
+                stability["hold_counter"] += 1
 
                 if stability["hold_counter"] >= hold_required:
+                    # Before confirming, test the transformation to catch bad camera poses early
+                    test_quat = rvec_to_quat(rvec)
+                    test_pos_world = transform_point_cam_to_world(tvec_flat, cam_pos, cam_quat)
+                    
+                    # Validate world frame Z (should be reasonable for tabletop objects)
+                    world_z_min = -0.5  # Minimum world Z (0.5m below camera)
+                    world_z_max = 1.5   # Maximum world Z (1.5m above camera)
+                    if test_pos_world[2] < world_z_min or test_pos_world[2] > world_z_max:
+                        # Outlier: World Z is unreasonable, reject confirmation
+                        if talk and estimate_pose.debug_counter % 30 == 0:
+                            print(f"[{marker_id}] Outlier: World Z={test_pos_world[2]:.3f}m out of range [{world_z_min:.3f}, {world_z_max:.3f}] - rejecting confirmation")
+                        # Reset hold counter to prevent confirmation with bad transformation
+                        stability["hold_counter"] = 0
+                        continue
+                    
+                    # Transformation looks good, proceed with confirmation
                     stability["confirmed"] = True
+                    # Only update confirmed baseline after confirmation
+                    stability["confirmed_tvec"] = tvec_flat.copy()
+                    stability["confirmed_rvec"] = rvec.copy()
 
                     measured_quat = rvec_to_quat(rvec)
                     pred_tvec, pred_rvec = kalman.predict()
@@ -147,6 +213,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     
                     # Convert to world frame
                     marker_pos_world = transform_point_cam_to_world(corrected_tvec, cam_pos, cam_quat)
+                    
                     marker_quat_world = transform_orientation_cam_to_world(corrected_quat, cam_quat)
                     
                     if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
@@ -177,6 +244,8 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
         else:
             # Reset confirmation after too many missed frames
             stability["confirmed"] = False
+            stability["confirmed_tvec"] = None  # Reset confirmed baseline
+            stability["confirmed_rvec"] = None  # Reset confirmed baseline
             kalman.reset()  # Reset the Kalman filter
             if talk:
                 print(f"[{marker_id}] Lost tracking - resetting confirmation and Kalman filter")
