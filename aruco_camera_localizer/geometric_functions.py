@@ -15,6 +15,110 @@ def quat_to_rvec(quat):
     rvec, _ = cv2.Rodrigues(rot)
     return rvec
 
+# Per-object state for RPY smoothing (maintains continuity across frames)
+# Using a dictionary to track multiple objects
+_rpy_prev_dict = {}
+# Per-object state for quaternion smoothing (reduces noise before RPY conversion)
+_quat_smoothed_dict = {}
+
+def quat_to_rpy_safe(quat, degrees=True, object_id=None, smoothing_alpha=0.75):
+    """
+    Convert quaternion [x, y, z, w] to roll, pitch, yaw (RPY) in a gimbal-lock-safe manner.
+    
+    This function handles gimbal lock by:
+    1. Smoothing the input quaternion using SLERP to reduce noise (especially important near gimbal lock)
+    2. Always using 'xyz' sequence for consistency (avoids discontinuities from sequence switching)
+    3. Maintaining temporal continuity by unwrapping angles relative to previous frame
+    4. Using per-object state tracking to avoid interference between different objects
+    
+    Note: Near gimbal lock (pitch ≈ ±90°), small quaternion noise causes large RPY variations.
+    Quaternion smoothing reduces this noise before conversion, significantly improving stability.
+    
+    Args:
+        quat: Quaternion [x, y, z, w]
+        degrees: If True, return angles in degrees; if False, return in radians
+        object_id: Optional identifier for per-object state tracking (e.g., object name)
+        smoothing_alpha: Smoothing factor (0.0-1.0). Higher = more smoothing, less responsive.
+                         Default 0.75 means 75% previous, 25% new quaternion.
+        
+    Returns:
+        numpy array [roll, pitch, yaw] in the requested units
+    """
+    global _rpy_prev_dict, _quat_smoothed_dict
+    
+    # Normalize input quaternion
+    quat = np.array(quat)
+    quat_norm = np.linalg.norm(quat)
+    if quat_norm > 1e-8:
+        quat = quat / quat_norm
+    else:
+        quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion as fallback
+    
+    # Use object_id as key for per-object tracking
+    key = object_id if object_id is not None else 'default'
+    
+    # Smooth quaternion using SLERP (spherical linear interpolation)
+    if key in _quat_smoothed_dict:
+        prev_quat = _quat_smoothed_dict[key]
+        
+        # Ensure quaternion continuity (q and -q represent same rotation)
+        # Choose the quaternion closer to previous one
+        dot1 = np.dot(prev_quat, quat)
+        dot2 = np.dot(prev_quat, -quat)
+        if abs(dot2) > abs(dot1):
+            quat = -quat
+        
+        # Smooth using SLERP: blend between previous and current quaternion
+        # smoothing_alpha = 0.75 means 75% previous, 25% new (more smoothing)
+        # blend = 1 - smoothing_alpha means how much of the new quaternion to use
+        blend = 1.0 - smoothing_alpha
+        smoothed_quat = slerp_quat(prev_quat, quat, blend)
+    else:
+        # First frame: use quaternion as-is (no previous to smooth with)
+        smoothed_quat = quat.copy()
+    
+    # Store smoothed quaternion for next frame
+    _quat_smoothed_dict[key] = smoothed_quat.copy()
+    
+    # Convert smoothed quaternion to RPY
+    r = R.from_quat(smoothed_quat)
+    
+    # Always use 'xyz' sequence for consistency
+    # This avoids discontinuities from switching sequences
+    rpy = r.as_euler('xyz', degrees=degrees)
+    
+    # Maintain temporal continuity by unwrapping angles relative to previous frame
+    if key in _rpy_prev_dict:
+        prev_rpy = _rpy_prev_dict[key]
+        
+        # Convert to radians for unwrapping
+        if degrees:
+            rpy_rad = np.deg2rad(rpy)
+            prev_rad = np.deg2rad(prev_rpy)
+        else:
+            rpy_rad = rpy
+            prev_rad = prev_rpy
+        
+        # Unwrap each angle relative to previous value
+        # This prevents jumps from 180° to -180° or vice versa
+        for i in range(3):
+            diff = rpy_rad[i] - prev_rad[i]
+            # If difference is > π, unwrap by adding/subtracting 2π
+            if diff > np.pi:
+                rpy_rad[i] -= 2 * np.pi
+            elif diff < -np.pi:
+                rpy_rad[i] += 2 * np.pi
+        
+        if degrees:
+            rpy = np.rad2deg(rpy_rad)
+        else:
+            rpy = rpy_rad
+    
+    # Store for next frame
+    _rpy_prev_dict[key] = rpy.copy()
+    
+    return rpy
+
 def transform_points_world_to_img(points_world, cam_pos_world, cam_quat_world, camera_matrix):
     image_points = []
     for pt in points_world:
@@ -39,6 +143,13 @@ def transform_orientation_cam_to_world(marker_quat_cam, cam_quat_world):
     r_cam_world = R.from_quat(cam_quat_world)
     r_marker_world = r_cam_world * r_marker_cam
     return r_marker_world.as_quat()
+
+def transform_orientation_world_to_cam(marker_quat_world, cam_quat_world):
+    """Transform orientation from world frame to camera frame"""
+    r_marker_world = R.from_quat(marker_quat_world)
+    r_cam_world = R.from_quat(cam_quat_world)
+    r_marker_cam = r_cam_world.inv() * r_marker_world
+    return r_marker_cam.as_quat()
 
 def slerp_quat(q1, q2, blend=0.5):
     """Spherical linear interpolation between two quaternions"""

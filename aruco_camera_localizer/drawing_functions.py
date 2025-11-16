@@ -1,7 +1,7 @@
 import cv2
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-    transform_points_world_to_img, transform_point_world_to_cam
+    transform_points_world_to_img, transform_point_world_to_cam, quat_to_rpy_safe
 import numpy as np
 
 def canonicalize_euler(orientation):
@@ -27,8 +27,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
     put_line(f"Frame: {frame_idx}", (200, 200, 200))
 
     # End Effector
-    ee_euler = R.from_quat(ee_quat).as_euler('xyz', degrees=True)
-    ee_euler = canonicalize_euler(ee_euler)
+    ee_euler = quat_to_rpy_safe(ee_quat, degrees=True, object_id='end_effector')
     put_line(f"EE xyz: ({1000*ee_pos[0]:.1f}, {1000*ee_pos[1]:.1f}, {1000*ee_pos[2]:.1f}) mm")
     put_line(f"EE rpy: ({ee_euler[0]: 5.1f}, {ee_euler[1]: 5.1f}, {ee_euler[2]: 5.1f}) deg")
 
@@ -47,7 +46,8 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
         pos = obj["position"]
         quat = obj["quaternion"]
 
-        euler = R.from_quat(quat).as_euler('xyz', degrees=True)
+        # Use object name as ID for per-object RPY state tracking
+        euler = quat_to_rpy_safe(quat, degrees=True, object_id=name)
         put_line(f"{name} xyz: ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}, {1000*pos[2]:.1f}) mm", (0, 255, 0))
         put_line(f"{name} rpy: ({euler[0]: 5.1f}, {euler[1]: 5.1f}, {euler[2]: 5.1f}) deg", (0, 255, 0))
         y += 5
@@ -59,6 +59,10 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
     }
 
     for obj in identified_objects:
+        # Skip all visualization if no_display flag is set (timeout exceeded)
+        if obj.get('no_display', False):
+            continue  # Don't draw anything for objects that exceeded timeout
+        
         name = obj["name"]
         world_pts = obj["points"]
         color = color_map.get(name, (255, 255, 255))  # default to white
@@ -142,6 +146,10 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
     """Draw grasp points for identified objects"""
     for obj in identified_objects:
         model_name = obj["name"]
+        
+        # Skip grasp points if no_display flag is set (timeout exceeded)
+        if obj.get('no_display', False):
+            continue  # Don't draw grasp points for objects that exceeded timeout
         
         # Check if this model has grasp points data
         if model_name not in model_data or model_data[model_name]['grasp_points'] is None:

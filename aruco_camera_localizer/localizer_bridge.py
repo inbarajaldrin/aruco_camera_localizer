@@ -8,6 +8,7 @@ from cv_bridge import CvBridge
 from max_camera_msgs.msg import PusherInfo, GraspPoint, GraspPointArray
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from aruco_camera_localizer.geometric_functions import quat_to_rpy_safe
 import threading
 
 class LocalizerBridge(Node):
@@ -21,7 +22,7 @@ class LocalizerBridge(Node):
         # Based on measurements: fork_orange (X=11.8mm, Y=6.7mm), line_brown (X=11.5mm, Y=7.2mm)
         # Average: X=11.66mm, Y=6.96mm. Using rounded values:
         # sim_offset: applied when using image topic (simulated environment)
-        self.sim_offset = np.array([-0.011086, -0.007811, -0.046685]) # meters (X, Y offsets, Z=0 to leave height unchanged)
+        self.sim_offset = np.array([-0.011086, -0.007811, 0]) # meters (X, Y offsets, Z=0 to leave height unchanged)
         # real_world_offset: applied when using real world camera (no image topic)
         # Set to zero since real world measurements are already correct
         self.real_world_offset = np.array([0.0, 0.0, 0.0]) # meters
@@ -57,7 +58,11 @@ class LocalizerBridge(Node):
         
         # --- Publishers ---
         self.cam_pose_pub = self.create_publisher(PoseStamped, '/camera_pose', 10)
-        self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
+        # Only create image publisher for real camera mode (not sim mode)
+        if not self.use_image_topic:
+            self.image_publisher = self.create_publisher(Image, 'intel_camera_rgb_raw', 10)
+        else:
+            self.image_publisher = None
         self.annotated_stream_pub = self.create_publisher(Image, 'annotated_stream', 10)
         self.bridge = CvBridge()
         
@@ -71,8 +76,8 @@ class LocalizerBridge(Node):
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
 
     def publish_image(self, frame):
-        """Publish raw camera image only when not using an image topic"""
-        if not self.use_image_topic:
+        """Publish raw camera image only when not using an image topic (real camera mode)"""
+        if not self.use_image_topic and self.image_publisher is not None:
             img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
             self.image_publisher.publish(img_msg)
 
@@ -190,6 +195,10 @@ class LocalizerBridge(Node):
         for obj in identified_objects:
             model_name = obj["name"]
             
+            # Skip grasp points if no_display flag is set (timeout exceeded)
+            if obj.get('no_display', False):
+                continue  # Don't publish grasp points for objects that exceeded timeout
+            
             # Check if this model has grasp points data
             if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
                 continue
@@ -235,7 +244,7 @@ class LocalizerBridge(Node):
                 grasp_msg.header.stamp = now
                 grasp_msg.header.frame_id = "base"
                 grasp_msg.object_name = model_name
-                grasp_msg.grasp_id = grasp_point['id']
+                grasp_msg.grasp_id = grasp_point.get('id', 0)  # Default to 0 if 'id' is missing
                 grasp_msg.grasp_type = grasp_point.get('type', 'unknown')
                 
                 # Set pose (position and orientation)
@@ -259,28 +268,47 @@ class LocalizerBridge(Node):
                     
                     # Generate full orientation from approach vector
                     # The approach vector becomes the Z-axis of the gripper frame
-                    z_axis = approach_vec_world / np.linalg.norm(approach_vec_world)
-                    
-                    # Create a perpendicular vector for X-axis (gripper opening direction)
-                    # Use a default direction and make it perpendicular to approach vector
-                    if abs(z_axis[0]) < 0.9:  # If not pointing along X
-                        x_axis = np.array([1.0, 0.0, 0.0])
-                    else:  # If pointing along X, use Y as reference
-                        x_axis = np.array([0.0, 1.0, 0.0])
-                    
-                    # Make X-axis perpendicular to Z-axis
-                    x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
-                    x_axis = x_axis / np.linalg.norm(x_axis)
-                    
-                    # Y-axis is cross product of Z and X
-                    y_axis = np.cross(z_axis, x_axis)
-                    y_axis = y_axis / np.linalg.norm(y_axis)
-                    
-                    # Construct rotation matrix
-                    rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
-                    
-                    # Convert to quaternion
-                    grasp_quat = R.from_matrix(rotation_matrix).as_quat()
+                    approach_norm = np.linalg.norm(approach_vec_world)
+                    if approach_norm < 1e-6:  # Avoid division by zero
+                        # Use default orientation if approach vector is invalid
+                        grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                    else:
+                        z_axis = approach_vec_world / approach_norm
+                        
+                        # Create a perpendicular vector for X-axis (gripper opening direction)
+                        # Use a default direction and make it perpendicular to approach vector
+                        if abs(z_axis[0]) < 0.9:  # If not pointing along X
+                            x_axis = np.array([1.0, 0.0, 0.0])
+                        else:  # If pointing along X, use Y as reference
+                            x_axis = np.array([0.0, 1.0, 0.0])
+                        
+                        # Make X-axis perpendicular to Z-axis
+                        x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
+                        x_axis_norm = np.linalg.norm(x_axis)
+                        if x_axis_norm < 1e-6:  # Avoid division by zero
+                            # Fallback: use a different reference vector
+                            if abs(z_axis[1]) < 0.9:
+                                x_axis = np.array([0.0, 1.0, 0.0])
+                            else:
+                                x_axis = np.array([0.0, 0.0, 1.0])
+                            x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
+                            x_axis = x_axis / np.linalg.norm(x_axis)
+                        else:
+                            x_axis = x_axis / x_axis_norm
+                        
+                        # Y-axis is cross product of Z and X
+                        y_axis = np.cross(z_axis, x_axis)
+                        y_axis_norm = np.linalg.norm(y_axis)
+                        if y_axis_norm < 1e-6:  # Avoid division by zero
+                            grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                        else:
+                            y_axis = y_axis / y_axis_norm
+                            
+                            # Construct rotation matrix
+                            rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
+                            
+                            # Convert to quaternion
+                            grasp_quat = R.from_matrix(rotation_matrix).as_quat()
                     
                 else:
                     # Default orientation (identity)
@@ -293,7 +321,8 @@ class LocalizerBridge(Node):
                 grasp_msg.pose.orientation.w = float(grasp_quat[3])
                 
                 # Convert quaternion to RPY degrees (same as object poses)
-                grasp_euler = R.from_quat(grasp_quat).as_euler('xyz', degrees=True)
+                # Use gimbal-lock-safe conversion
+                grasp_euler = quat_to_rpy_safe(grasp_quat, degrees=True)
                 grasp_msg.roll = float(grasp_euler[0])
                 grasp_msg.pitch = float(grasp_euler[1])
                 grasp_msg.yaw = float(grasp_euler[2])
