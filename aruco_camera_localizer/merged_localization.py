@@ -1015,6 +1015,29 @@ def main():
                 
                 # Transform to camera frame
                 object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
+                
+                # Validate wireframe position before drawing
+                # Check if object is in front of camera and within reasonable distance
+                is_valid_position = True
+                
+                # Check depth (z should be positive and reasonable)
+                if object_pos_cam[2] <= 0.01:  # Behind camera or too close
+                    is_valid_position = False
+                elif object_pos_cam[2] > 2.0:  # Too far away (unlikely to be visible)
+                    is_valid_position = False
+                elif object_pos_cam[2] < 0.05:  # Very close (might be invalid)
+                    is_valid_position = False
+                
+                # Check if object is within reasonable bounds (not too far from camera center)
+                distance_from_camera = np.linalg.norm(object_pos_cam)
+                if distance_from_camera > 2.5:  # Too far
+                    is_valid_position = False
+                
+                if not is_valid_position:
+                    # Skip wireframe drawing if position is invalid
+                    # This prevents displaying wireframe when ghost tracking has drifted
+                    continue
+                
                 # For quaternion, we need to transform from world to camera frame
                 cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
                 object_rotation_matrix = R.from_quat(object_quat_world).as_matrix()
@@ -1031,6 +1054,17 @@ def main():
                 
                 transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
                 projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS, scale_factor)
+                
+                # Additional validation: check if at least some vertices are within image bounds
+                if len(projected_vertices) > 0:
+                    vertices_in_bounds = 0
+                    for v in projected_vertices:
+                        if 0 <= v[0] < frame.shape[1] and 0 <= v[1] < frame.shape[0]:
+                            vertices_in_bounds += 1
+                    
+                    # If less than 10% of vertices are in bounds, object is likely out of view
+                    if vertices_in_bounds < len(projected_vertices) * 0.1:
+                        continue  # Skip drawing if object is mostly out of view
                 
                 # Draw wireframe lines directly on the frame (no mask needed)
                 for edge in wireframe_edges:
@@ -1152,14 +1186,28 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
+    # Cleanup: release resources and shut down ROS2 before saving debug data
     if cap is not None:
         cap.release()
     if not headless_mode:
         cv2.destroyAllWindows()
     
+    # Shut down ROS2 properly before saving debug data
+    # This prevents threading conflicts during JSON serialization
+    try:
+        bridge_node.destroy_node()
+        rclpy.shutdown()
+    except Exception as e:
+        if not headless_mode:
+            print(f"Warning during ROS2 shutdown: {e}")
+    
     # Save debug data if recording was enabled
+    # Do this after ROS2 shutdown to avoid threading conflicts
     if args.debug_record and debug_data is not None:
         try:
+            if not headless_mode:
+                print(f"\nSaving debug data to: {debug_file}")
+                print(f"Recorded {len(debug_data)} frames")
             with open(debug_file, 'w') as f:
                 json.dump({
                     "recording_info": {
@@ -1171,8 +1219,11 @@ def main():
                     "frames": debug_data
                 }, f, indent=2)
             if not headless_mode:
-                print(f"\nDebug data saved to: {debug_file}")
-                print(f"Recorded {len(debug_data)} frames")
+                print(f"Debug data saved successfully")
+        except KeyboardInterrupt:
+            # If user interrupts during save, just exit
+            if not headless_mode:
+                print(f"\nDebug data save interrupted")
         except Exception as e:
             if not headless_mode:
                 print(f"Error saving debug data: {e}")

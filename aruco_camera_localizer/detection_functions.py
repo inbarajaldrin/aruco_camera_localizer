@@ -503,9 +503,10 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     from aruco_camera_localizer.geometric_functions import slerp_quat
                     marker_quat_world = slerp_quat(prev_quat, marker_quat_world, 0.3)  # 30% toward new, 70% old
             
-            # Update last known world pose for future use
-            stability["last_known_tvec_world"] = marker_pos_world.copy()
-            stability["last_known_rvec_world"] = marker_quat_world.copy()
+            # DO NOT update last known world pose during ghost tracking
+            # The world pose should only be updated when we have fresh detections
+            # This prevents drift accumulation during ghost tracking
+            # The stored world pose remains frozen at the last known good measurement
             
             if talk and estimate_pose.debug_counter % 30 == 0:  # Only print every 30 calls
                 method = "Kalman" if frames_since_last_seen < 5 else ("Last known (moving)" if robot_moving else "Last known (stationary)")
