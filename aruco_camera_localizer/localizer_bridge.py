@@ -15,7 +15,7 @@ class LocalizerBridge(Node):
     def __init__(self, image_topic=None):
         super().__init__('localizer_bridge')
         # Offset of camera from EE (in EE frame)
-        self.cam_offset_position = np.array([-0.012, -0.048, -0.1]) # meters
+        self.cam_offset_position = np.array([-0.012, -0.036, -0.1]) # meters
         self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
         
         # Object pose correction offsets (X and Y offsets to account for real vs simulated differences)
@@ -25,7 +25,7 @@ class LocalizerBridge(Node):
         self.sim_offset = np.array([-0.011086, -0.007811, 0]) # meters (X, Y offsets, Z=0 to leave height unchanged)
         # real_world_offset: applied when using real world camera (no image topic)
         # Set to zero since real world measurements are already correct
-        self.real_world_offset = np.array([0.0, 0.0, 0.0]) # meters
+        self.real_world_offset = np.array([0.0, -0.0, 0.0]) # meters
         
         # Rotation offsets for sim and real (quaternion format: [x, y, z, w])
         self.sim_offset_quat = np.array([0.0, 1.0, 0.0, 0.0]) # rotation offset for simulated environment
@@ -70,7 +70,7 @@ class LocalizerBridge(Node):
         self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses_real', 10)
         
         # Grasp points publisher
-        self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points', 10)
+        self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points_real', 10)
         
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
