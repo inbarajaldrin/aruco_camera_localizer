@@ -171,8 +171,23 @@ class LocalizerBridge(Node):
             object_pos = obj["position"]
             object_quat = obj["quaternion"]
             
-            # Transform object rotation to rotation matrix
+            # For objects symmetric about Y-axis, normalize Y-axis rotation to nearest 90° increment
+            # This ensures same grasp orientation for 90°, 180°, 270° rotations around Y-axis
+            r_obj = R.from_quat(object_quat)
+            # Extract Euler angles (using 'xyz' sequence: roll, pitch, yaw)
+            euler = r_obj.as_euler('xyz', degrees=True)
+            # Extract Y-axis rotation (pitch in 'xyz' sequence)
+            y_rotation = euler[1]  # pitch is rotation around Y-axis
+            # Round to nearest 90° increment
+            y_rotation_normalized = round(y_rotation / 90.0) * 90.0
+            # Create normalized quaternion with only Y-axis rotation
+            r_normalized = R.from_euler('xyz', [euler[0], y_rotation_normalized, euler[2]], degrees=True)
+            object_quat_normalized = r_normalized.as_quat()
+            
+            # Use normalized quaternion for approach vector computation (for symmetric objects)
+            # But use original quaternion for position transformation
             rot_matrix = R.from_quat(object_quat).as_matrix()
+            rot_matrix_normalized = R.from_quat(object_quat_normalized).as_matrix()
             
             # Coordinate system transformation matrix (same as wireframe)
             coord_transform = np.array([
@@ -216,9 +231,9 @@ class LocalizerBridge(Node):
                     upward_world = np.array([0.0, 0.0, 1.0])
                     
                     # Transform upward direction from world frame to object frame
-                    # This ensures the approach vector always points upward in world frame
-                    # regardless of object orientation
-                    approach_vec_transformed = rot_matrix.T @ upward_world
+                    # Use normalized rotation (Y-axis rounded to 90° increments) for symmetric objects
+                    # This ensures same grasp orientation for objects rotated 90°, 180°, 270° around Y-axis
+                    approach_vec_transformed = rot_matrix_normalized.T @ upward_world
                     
                     # Generate full orientation from approach vector (in object frame)
                     # The approach vector becomes the Z-axis of the gripper frame
@@ -265,15 +280,16 @@ class LocalizerBridge(Node):
                             grasp_quat_object = R.from_matrix(rotation_matrix).as_quat()
                     
                     # Transform orientation from object frame to world frame
-                    # world_orientation = object_orientation * grasp_orientation_object
+                    # Use normalized rotation (Y-axis rounded to 90° increments) for symmetric objects
+                    # world_orientation = object_orientation_normalized * grasp_orientation_object
                     r_grasp_object = R.from_quat(grasp_quat_object)
-                    r_object_world = R.from_quat(object_quat)
+                    r_object_world = R.from_quat(object_quat_normalized)
                     r_grasp_world = r_object_world * r_grasp_object
                     grasp_quat = r_grasp_world.as_quat()
                     
                 else:
                     # Default orientation (identity in world frame)
-                    grasp_quat = object_quat  # Use object orientation as default
+                    grasp_quat = object_quat_normalized  # Use normalized object orientation as default
                 
                 # Set orientation (in world frame, so it changes with object pose)
                 grasp_msg.pose.orientation.x = float(grasp_quat[0])
