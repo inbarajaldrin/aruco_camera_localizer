@@ -195,19 +195,18 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
                 # Draw grasp point as a circle (Blue color)
                 cv2.circle(frame, grasp_point_img, 8, (255, 0, 0), -1)  # Blue circle, larger size
                 
-                # Draw approach vector if available (DISABLED)
+                # Draw approach vector if available
+                # Compute approach vector to always point upward in world frame based on object's current orientation
                 if 'approach_vector' in grasp_point:
-                    approach_vec = np.array([
-                        grasp_point['approach_vector']['x'],
-                        grasp_point['approach_vector']['y'],
-                        grasp_point['approach_vector']['z']
-                    ])
+                    # Define upward direction in world frame (Z-up)
+                    upward_world = np.array([0.0, 0.0, 1.0])
                     
-                    # Apply coordinate system transformation to approach vector
-                    approach_vec_transformed = coord_transform @ approach_vec
+                    # Transform upward direction from world frame to object frame
+                    # This ensures the approach vector always points upward in world frame
+                    approach_vec_object = rot_matrix.T @ upward_world
                     
-                    # Transform approach vector to world frame
-                    approach_vec_world = rot_matrix @ approach_vec_transformed
+                    # Transform approach vector to world frame for visualization
+                    approach_vec_world = rot_matrix @ approach_vec_object
                     
                     # Calculate end point of approach vector (increased scale for better visibility)
                     approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility

@@ -18,19 +18,6 @@ class LocalizerBridge(Node):
         self.cam_offset_position = np.array([-0.012, -0.036, -0.1]) # meters
         self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
         
-        # Object pose correction offsets (X and Y offsets to account for real vs simulated differences)
-        # Based on measurements: fork_orange (X=11.8mm, Y=6.7mm), line_brown (X=11.5mm, Y=7.2mm)
-        # Average: X=11.66mm, Y=6.96mm. Using rounded values:
-        # sim_offset: applied when using image topic (simulated environment)
-        self.sim_offset = np.array([-0.011086, -0.007811, 0]) # meters (X, Y offsets, Z=0 to leave height unchanged)
-        # real_world_offset: applied when using real world camera (no image topic)
-        # Set to zero since real world measurements are already correct
-        self.real_world_offset = np.array([0.0, -0.0, 0.0]) # meters
-        
-        # Rotation offsets for sim and real (quaternion format: [x, y, z, w])
-        self.sim_offset_quat = np.array([0.0, 1.0, 0.0, 0.0]) # rotation offset for simulated environment
-        self.real_world_offset_quat = np.array([0.0, 1.0, 0.0, 0.0]) # rotation offset for real world
-        
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
         self.ee_position = np.array([-0.144, -0.435, 0.202])
         self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
@@ -120,20 +107,6 @@ class LocalizerBridge(Node):
             cam_quat_world = (r_ee * r_cam_offset).as_quat()
         return cam_pos_world, cam_quat_world
     
-    def get_object_pose_offset(self):
-        """Get the appropriate object pose offset based on whether using image topic (sim) or real camera"""
-        if self.use_image_topic:
-            return self.sim_offset  # Use sim offset when using image topic (simulated)
-        else:
-            return self.real_world_offset  # Use real world offset when using real camera
-    
-    def get_object_rotation_offset(self):
-        """Get the appropriate object rotation offset based on whether using image topic (sim) or real camera"""
-        if self.use_image_topic:
-            return self.sim_offset_quat  # Use sim rotation offset when using image topic (simulated)
-        else:
-            return self.real_world_offset_quat  # Use real world rotation offset when using real camera
-
     def publish_camera_pose(self, pos, quat):
         msg = PoseStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -156,26 +129,16 @@ class LocalizerBridge(Node):
             transform.header.frame_id = "World"  # Parent frame
             transform.child_frame_id = obj["name"]  # Object name as child frame
             
-            # Apply object pose correction offset (X and Y offsets for real vs simulated differences)
-            # Use sim_offset when using image topic, real_world_offset when using real camera
-            corrected_position = obj["position"] + self.get_object_pose_offset()
-            
             # Set translation
-            transform.transform.translation.x = float(corrected_position[0])
-            transform.transform.translation.y = float(corrected_position[1])
-            transform.transform.translation.z = float(corrected_position[2])
-            
-            # Apply rotation offset (quaternion format: [x, y, z, w])
-            rotation_offset_quat = self.get_object_rotation_offset()
-            r_obj = R.from_quat(obj["quaternion"])
-            r_offset = R.from_quat(rotation_offset_quat)
-            corrected_quat = (r_obj * r_offset).as_quat()
+            transform.transform.translation.x = float(obj["position"][0])
+            transform.transform.translation.y = float(obj["position"][1])
+            transform.transform.translation.z = float(obj["position"][2])
             
             # Set rotation (quaternion)
-            transform.transform.rotation.x = float(corrected_quat[0])
-            transform.transform.rotation.y = float(corrected_quat[1])
-            transform.transform.rotation.z = float(corrected_quat[2])
-            transform.transform.rotation.w = float(corrected_quat[3])
+            transform.transform.rotation.x = float(obj["quaternion"][0])
+            transform.transform.rotation.y = float(obj["quaternion"][1])
+            transform.transform.rotation.z = float(obj["quaternion"][2])
+            transform.transform.rotation.w = float(obj["quaternion"][3])
             
             msg.transforms.append(transform)
         
@@ -204,15 +167,9 @@ class LocalizerBridge(Node):
                 continue
                 
             grasp_points = model_data[model_name]['grasp_points']
-            # Apply object pose correction offset (X and Y offsets for real vs simulated differences)
-            # Use sim_offset when using image topic, real_world_offset when using real camera
-            object_pos = obj["position"] + self.get_object_pose_offset()
-            
-            # Apply rotation offset (quaternion format: [x, y, z, w])
-            rotation_offset_quat = self.get_object_rotation_offset()
-            r_obj = R.from_quat(obj["quaternion"])
-            r_offset = R.from_quat(rotation_offset_quat)
-            object_quat = (r_obj * r_offset).as_quat()
+            # Use raw object position and quaternion
+            object_pos = obj["position"]
+            object_quat = obj["quaternion"]
             
             # Transform object rotation to rotation matrix
             rot_matrix = R.from_quat(object_quat).as_matrix()
@@ -252,18 +209,16 @@ class LocalizerBridge(Node):
                 grasp_msg.pose.position.y = float(grasp_pos_world[1])
                 grasp_msg.pose.position.z = float(grasp_pos_world[2])
                 
-                # Generate orientation from approach vector if available
-                # First compute orientation in object frame, then transform to world frame
+                # Generate orientation from approach vector
+                # Compute approach vector to always point upward in world frame based on object's current orientation
                 if 'approach_vector' in grasp_point:
-                    approach_vec_local = np.array([
-                        grasp_point['approach_vector']['x'],
-                        grasp_point['approach_vector']['y'],
-                        grasp_point['approach_vector']['z']
-                    ])
+                    # Define upward direction in world frame (Z-up)
+                    upward_world = np.array([0.0, 0.0, 1.0])
                     
-                    # Apply coordinate system transformation to approach vector
-                    # This is still in object frame (not world frame)
-                    approach_vec_transformed = coord_transform @ approach_vec_local
+                    # Transform upward direction from world frame to object frame
+                    # This ensures the approach vector always points upward in world frame
+                    # regardless of object orientation
+                    approach_vec_transformed = rot_matrix.T @ upward_world
                     
                     # Generate full orientation from approach vector (in object frame)
                     # The approach vector becomes the Z-axis of the gripper frame
