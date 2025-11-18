@@ -196,26 +196,26 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
                 cv2.circle(frame, grasp_point_img, 8, (255, 0, 0), -1)  # Blue circle, larger size
                 
                 # Draw approach vector if available (DISABLED)
-                # if 'approach_vector' in grasp_point:
-                #     approach_vec = np.array([
-                #         grasp_point['approach_vector']['x'],
-                #         grasp_point['approach_vector']['y'],
-                #         grasp_point['approach_vector']['z']
-                #     ])
-                #     
-                #     # Apply coordinate system transformation to approach vector
-                #     approach_vec_transformed = coord_transform @ approach_vec
-                #     
-                #     # Transform approach vector to world frame
-                #     approach_vec_world = rot_matrix @ approach_vec_transformed
-                #     
-                #     # Calculate end point of approach vector (increased scale for better visibility)
-                #     approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility
-                #     approach_end_img = transform_points_world_to_img([approach_end_world], cam_pos, cam_quat, camera_matrix)
-                #     
-                #     if approach_end_img[0] is not None:
-                #         # Draw approach vector as arrow (thicker line for better visibility)
-                #         cv2.arrowedLine(frame, grasp_point_img, approach_end_img[0], (0, 255, 0), 3, tipLength=0.3)  # Green arrow
+                if 'approach_vector' in grasp_point:
+                    approach_vec = np.array([
+                        grasp_point['approach_vector']['x'],
+                        grasp_point['approach_vector']['y'],
+                        grasp_point['approach_vector']['z']
+                    ])
+                    
+                    # Apply coordinate system transformation to approach vector
+                    approach_vec_transformed = coord_transform @ approach_vec
+                    
+                    # Transform approach vector to world frame
+                    approach_vec_world = rot_matrix @ approach_vec_transformed
+                    
+                    # Calculate end point of approach vector (increased scale for better visibility)
+                    approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility
+                    approach_end_img = transform_points_world_to_img([approach_end_world], cam_pos, cam_quat, camera_matrix)
+                    
+                    if approach_end_img[0] is not None:
+                        # Draw approach vector as arrow (thicker line for better visibility)
+                        cv2.arrowedLine(frame, grasp_point_img, approach_end_img[0], (0, 255, 0), 3, tipLength=0.3)  # Green arrow
                 
                 # Draw grasp point ID (larger text for better visibility)
                 cv2.putText(frame, f"G{i+1}", 

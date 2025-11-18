@@ -253,6 +253,7 @@ class LocalizerBridge(Node):
                 grasp_msg.pose.position.z = float(grasp_pos_world[2])
                 
                 # Generate orientation from approach vector if available
+                # First compute orientation in object frame, then transform to world frame
                 if 'approach_vector' in grasp_point:
                     approach_vec_local = np.array([
                         grasp_point['approach_vector']['x'],
@@ -261,19 +262,17 @@ class LocalizerBridge(Node):
                     ])
                     
                     # Apply coordinate system transformation to approach vector
+                    # This is still in object frame (not world frame)
                     approach_vec_transformed = coord_transform @ approach_vec_local
                     
-                    # Transform approach vector to world frame
-                    approach_vec_world = rot_matrix @ approach_vec_transformed
-                    
-                    # Generate full orientation from approach vector
+                    # Generate full orientation from approach vector (in object frame)
                     # The approach vector becomes the Z-axis of the gripper frame
-                    approach_norm = np.linalg.norm(approach_vec_world)
+                    approach_norm = np.linalg.norm(approach_vec_transformed)
                     if approach_norm < 1e-6:  # Avoid division by zero
                         # Use default orientation if approach vector is invalid
-                        grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                        grasp_quat_object = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
                     else:
-                        z_axis = approach_vec_world / approach_norm
+                        z_axis = approach_vec_transformed / approach_norm
                         
                         # Create a perpendicular vector for X-axis (gripper opening direction)
                         # Use a default direction and make it perpendicular to approach vector
@@ -300,21 +299,28 @@ class LocalizerBridge(Node):
                         y_axis = np.cross(z_axis, x_axis)
                         y_axis_norm = np.linalg.norm(y_axis)
                         if y_axis_norm < 1e-6:  # Avoid division by zero
-                            grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                            grasp_quat_object = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
                         else:
                             y_axis = y_axis / y_axis_norm
                             
                             # Construct rotation matrix
                             rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
                             
-                            # Convert to quaternion
-                            grasp_quat = R.from_matrix(rotation_matrix).as_quat()
+                            # Convert to quaternion (in object frame)
+                            grasp_quat_object = R.from_matrix(rotation_matrix).as_quat()
+                    
+                    # Transform orientation from object frame to world frame
+                    # world_orientation = object_orientation * grasp_orientation_object
+                    r_grasp_object = R.from_quat(grasp_quat_object)
+                    r_object_world = R.from_quat(object_quat)
+                    r_grasp_world = r_object_world * r_grasp_object
+                    grasp_quat = r_grasp_world.as_quat()
                     
                 else:
-                    # Default orientation (identity)
-                    grasp_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
+                    # Default orientation (identity in world frame)
+                    grasp_quat = object_quat  # Use object orientation as default
                 
-                # Set orientation in world frame
+                # Set orientation (in world frame, so it changes with object pose)
                 grasp_msg.pose.orientation.x = float(grasp_quat[0])
                 grasp_msg.pose.orientation.y = float(grasp_quat[1])
                 grasp_msg.pose.orientation.z = float(grasp_quat[2])
