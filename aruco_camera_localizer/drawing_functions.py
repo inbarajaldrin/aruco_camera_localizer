@@ -143,7 +143,7 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
     return frame
 
 def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_objects, model_data):
-    """Draw grasp points for identified objects"""
+    """Draw grasp points for identified objects (without approach vectors)"""
     for obj in identified_objects:
         model_name = obj["name"]
         
@@ -189,34 +189,13 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
         # Transform grasp points to image coordinates
         grasp_points_img = transform_points_world_to_img(world_grasp_points, cam_pos, cam_quat, camera_matrix)
         
-        # Draw grasp points
-        for i, (grasp_point_img, grasp_point) in enumerate(zip(grasp_points_img, grasp_points)):
+        # Draw grasp points (without approach vectors)
+        for i, grasp_point_img in enumerate(grasp_points_img):
             if grasp_point_img is not None:
                 # Draw grasp point as a circle (Blue color)
                 cv2.circle(frame, grasp_point_img, 8, (255, 0, 0), -1)  # Blue circle, larger size
                 
-                # Draw approach vector if available
-                # Compute approach vector to always point upward in world frame based on object's current orientation
-                if 'approach_vector' in grasp_point:
-                    # Define upward direction in world frame (Z-up)
-                    upward_world = np.array([0.0, 0.0, 1.0])
-                    
-                    # Transform upward direction from world frame to object frame
-                    # This ensures the approach vector always points upward in world frame
-                    approach_vec_object = rot_matrix.T @ upward_world
-                    
-                    # Transform approach vector to world frame for visualization
-                    approach_vec_world = rot_matrix @ approach_vec_object
-                    
-                    # Calculate end point of approach vector (increased scale for better visibility)
-                    approach_end_world = world_grasp_points[i] + 0.05 * approach_vec_world  # 5cm length for better visibility
-                    approach_end_img = transform_points_world_to_img([approach_end_world], cam_pos, cam_quat, camera_matrix)
-                    
-                    if approach_end_img[0] is not None:
-                        # Draw approach vector as arrow (thicker line for better visibility)
-                        cv2.arrowedLine(frame, grasp_point_img, approach_end_img[0], (0, 255, 0), 3, tipLength=0.3)  # Green arrow
-                
-                # Draw grasp point ID (larger text for better visibility)
+                # Draw grasp point ID
                 cv2.putText(frame, f"G{i+1}", 
                            (grasp_point_img[0] + 10, grasp_point_img[1] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)  # White text with thicker stroke

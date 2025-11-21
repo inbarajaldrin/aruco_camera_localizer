@@ -5,7 +5,7 @@ from std_msgs.msg import Header, ColorRGBA, Int32
 from sensor_msgs.msg import Image
 from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
-from max_camera_msgs.msg import PusherInfo, GraspPoint, GraspPointArray
+from max_camera_msgs.msg import PusherInfo
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.geometric_functions import quat_to_rpy_safe
@@ -55,9 +55,6 @@ class LocalizerBridge(Node):
         
         # Use TF2 message for object poses
         self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses_real', 10)
-        
-        # Grasp points publisher
-        self.grasp_points_pub = self.create_publisher(GraspPointArray, '/grasp_points_real', 10)
         
         self.pusher_publishers = {}
         self.frame_num_publsher = self.create_publisher(Int32, '/camera_frame_number', 10)
@@ -144,170 +141,6 @@ class LocalizerBridge(Node):
         
         # Publish the TF2 message
         self.object_poses_pub.publish(msg)
-
-    def publish_grasp_points(self, identified_objects, model_data):
-        """Publish grasp points for all identified objects"""
-        now = self.get_clock().now().to_msg()
-        
-        # Create GraspPointArray message
-        msg = GraspPointArray()
-        msg.header.stamp = now
-        msg.header.frame_id = "base"
-        
-        # Process each identified object
-        for obj in identified_objects:
-            model_name = obj["name"]
-            
-            # Skip grasp points if no_display flag is set (timeout exceeded)
-            if obj.get('no_display', False):
-                continue  # Don't publish grasp points for objects that exceeded timeout
-            
-            # Check if this model has grasp points data
-            if model_name not in model_data or model_data[model_name]['grasp_points'] is None:
-                continue
-                
-            grasp_points = model_data[model_name]['grasp_points']
-            # Use raw object position and quaternion
-            object_pos = obj["position"]
-            object_quat = obj["quaternion"]
-            
-            # For objects symmetric about Y-axis, normalize Y-axis rotation to nearest 90° increment
-            # This ensures same grasp orientation for 90°, 180°, 270° rotations around Y-axis
-            r_obj = R.from_quat(object_quat)
-            # Extract Euler angles (using 'xyz' sequence: roll, pitch, yaw)
-            euler = r_obj.as_euler('xyz', degrees=True)
-            # Extract Y-axis rotation (pitch in 'xyz' sequence)
-            y_rotation = euler[1]  # pitch is rotation around Y-axis
-            # Round to nearest 90° increment
-            y_rotation_normalized = round(y_rotation / 90.0) * 90.0
-            # Create normalized quaternion with only Y-axis rotation
-            r_normalized = R.from_euler('xyz', [euler[0], y_rotation_normalized, euler[2]], degrees=True)
-            object_quat_normalized = r_normalized.as_quat()
-            
-            # Use normalized quaternion for approach vector computation (for symmetric objects)
-            # But use original quaternion for position transformation
-            rot_matrix = R.from_quat(object_quat).as_matrix()
-            rot_matrix_normalized = R.from_quat(object_quat_normalized).as_matrix()
-            
-            # Coordinate system transformation matrix (same as wireframe)
-            coord_transform = np.array([
-                [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-                [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-                [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-            ])
-            
-            # Process each grasp point
-            for grasp_point in grasp_points:
-                # Get grasp point position relative to object center
-                grasp_pos_local = np.array([
-                    grasp_point['position']['x'],
-                    grasp_point['position']['y'], 
-                    grasp_point['position']['z']
-                ])
-                
-                # Apply coordinate system transformation (same as wireframe)
-                grasp_pos_transformed = coord_transform @ grasp_pos_local
-                
-                # Transform to world frame
-                grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
-                
-                # Create GraspPoint message
-                grasp_msg = GraspPoint()
-                grasp_msg.header.stamp = now
-                grasp_msg.header.frame_id = "base"
-                grasp_msg.object_name = model_name
-                grasp_msg.grasp_id = grasp_point.get('id', 0)  # Default to 0 if 'id' is missing
-                grasp_msg.grasp_type = grasp_point.get('type', 'unknown')
-                
-                # Set pose (position and orientation)
-                grasp_msg.pose.position.x = float(grasp_pos_world[0])
-                grasp_msg.pose.position.y = float(grasp_pos_world[1])
-                grasp_msg.pose.position.z = float(grasp_pos_world[2])
-                
-                # Generate orientation from approach vector
-                # Compute approach vector to always point upward in world frame based on object's current orientation
-                if 'approach_vector' in grasp_point:
-                    # Define upward direction in world frame (Z-up)
-                    upward_world = np.array([0.0, 0.0, 1.0])
-                    
-                    # Transform upward direction from world frame to object frame
-                    # Use normalized rotation (Y-axis rounded to 90° increments) for symmetric objects
-                    # This ensures same grasp orientation for objects rotated 90°, 180°, 270° around Y-axis
-                    approach_vec_transformed = rot_matrix_normalized.T @ upward_world
-                    
-                    # Generate full orientation from approach vector (in object frame)
-                    # The approach vector becomes the Z-axis of the gripper frame
-                    approach_norm = np.linalg.norm(approach_vec_transformed)
-                    if approach_norm < 1e-6:  # Avoid division by zero
-                        # Use default orientation if approach vector is invalid
-                        grasp_quat_object = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
-                    else:
-                        z_axis = approach_vec_transformed / approach_norm
-                        
-                        # Create a perpendicular vector for X-axis (gripper opening direction)
-                        # Use a default direction and make it perpendicular to approach vector
-                        if abs(z_axis[0]) < 0.9:  # If not pointing along X
-                            x_axis = np.array([1.0, 0.0, 0.0])
-                        else:  # If pointing along X, use Y as reference
-                            x_axis = np.array([0.0, 1.0, 0.0])
-                        
-                        # Make X-axis perpendicular to Z-axis
-                        x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
-                        x_axis_norm = np.linalg.norm(x_axis)
-                        if x_axis_norm < 1e-6:  # Avoid division by zero
-                            # Fallback: use a different reference vector
-                            if abs(z_axis[1]) < 0.9:
-                                x_axis = np.array([0.0, 1.0, 0.0])
-                            else:
-                                x_axis = np.array([0.0, 0.0, 1.0])
-                            x_axis = x_axis - np.dot(x_axis, z_axis) * z_axis
-                            x_axis = x_axis / np.linalg.norm(x_axis)
-                        else:
-                            x_axis = x_axis / x_axis_norm
-                        
-                        # Y-axis is cross product of Z and X
-                        y_axis = np.cross(z_axis, x_axis)
-                        y_axis_norm = np.linalg.norm(y_axis)
-                        if y_axis_norm < 1e-6:  # Avoid division by zero
-                            grasp_quat_object = np.array([0.0, 0.0, 0.0, 1.0])  # Identity quaternion
-                        else:
-                            y_axis = y_axis / y_axis_norm
-                            
-                            # Construct rotation matrix
-                            rotation_matrix = np.column_stack([x_axis, y_axis, z_axis])
-                            
-                            # Convert to quaternion (in object frame)
-                            grasp_quat_object = R.from_matrix(rotation_matrix).as_quat()
-                    
-                    # Transform orientation from object frame to world frame
-                    # Use normalized rotation (Y-axis rounded to 90° increments) for symmetric objects
-                    # world_orientation = object_orientation_normalized * grasp_orientation_object
-                    r_grasp_object = R.from_quat(grasp_quat_object)
-                    r_object_world = R.from_quat(object_quat_normalized)
-                    r_grasp_world = r_object_world * r_grasp_object
-                    grasp_quat = r_grasp_world.as_quat()
-                    
-                else:
-                    # Default orientation (identity in world frame)
-                    grasp_quat = object_quat_normalized  # Use normalized object orientation as default
-                
-                # Set orientation (in world frame, so it changes with object pose)
-                grasp_msg.pose.orientation.x = float(grasp_quat[0])
-                grasp_msg.pose.orientation.y = float(grasp_quat[1])
-                grasp_msg.pose.orientation.z = float(grasp_quat[2])
-                grasp_msg.pose.orientation.w = float(grasp_quat[3])
-                
-                # Convert quaternion to RPY degrees (same as object poses)
-                # Use gimbal-lock-safe conversion
-                grasp_euler = quat_to_rpy_safe(grasp_quat, degrees=True)
-                grasp_msg.roll = float(grasp_euler[0])
-                grasp_msg.pitch = float(grasp_euler[1])
-                grasp_msg.yaw = float(grasp_euler[2])
-                
-                msg.grasp_points.append(grasp_msg)
-        
-        # Publish the structured message
-        self.grasp_points_pub.publish(msg)
 
     def publish_contacts(self, pushers):
         now = self.get_clock().now().to_msg()

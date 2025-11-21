@@ -336,6 +336,7 @@ def load_grasp_points_data(json_file):
         data = json.load(f)
     return data['grasp_points']
 
+
 def transform_mesh_to_camera_frame(vertices, object_pose):
     """Transform mesh vertices from object center frame to camera frame"""
     object_tvec, object_rvec = object_pose
@@ -620,9 +621,9 @@ def main():
     smoothing_alpha_ghost = 0.2  # When using ghost data (20% new, 80% old - more stable)
     smoothing_alpha_stationary_ghost = 0.05  # When stationary and using ghost (5% new, 95% old - very stable)
     
-    # Timeout for ghost tracking - after this time, stop displaying wireframe/grasp points but continue tracking/publishing
+    # Timeout for ghost tracking - after this time, stop displaying wireframe but continue tracking/publishing
     # Set to 2 seconds for both stationary and moving cases
-    # After timeout: objects are still tracked and pose is published, but wireframe/grasp points are not displayed
+    # After timeout: objects are still tracked and pose is published, but wireframe is not displayed
     ghost_tracking_timeout_stationary = 60  # frames - 2 seconds at 30fps
     ghost_tracking_timeout_moving = 60  # frames - 2 seconds at 30fps
 
@@ -844,7 +845,7 @@ def main():
                 avg_quality = np.mean(measurement_qualities) if measurement_qualities else 1.0
                 
                 # Check timeout if all detections are ghost
-                # After timeout, mark as no_display (no wireframe/grasp points) but continue tracking/publishing
+                # After timeout, mark as no_display (no wireframe) but continue tracking/publishing
                 timeout_exceeded = False
                 if all_ghost and model_name in object_last_fresh_frame:
                     last_fresh = object_last_fresh_frame[model_name]
@@ -860,7 +861,7 @@ def main():
                     if frames_since_fresh > timeout:
                         timeout_exceeded = True
                         if talk and frame_idx % 30 == 0 and not headless_mode:
-                            print(f"[{model_name}] Timeout: all markers ghost for {frames_since_fresh} frames (timeout={timeout}) - stopping wireframe/grasp display, continuing pose tracking")
+                            print(f"[{model_name}] Timeout: all markers ghost for {frames_since_fresh} frames (timeout={timeout}) - stopping wireframe display, continuing pose tracking")
                 
                 if has_ghost:
                     # Using ghost data - be more conservative to prevent flickering
@@ -1081,9 +1082,6 @@ def main():
         detected_objects = []
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
-        # Only publish grasp points in real camera mode (not sim mode)
-        if not use_ros_topic:
-            bridge_node.publish_grasp_points(identified_objects+identified_jenga, model_data)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
         draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
