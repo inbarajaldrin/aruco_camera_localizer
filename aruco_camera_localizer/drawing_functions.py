@@ -63,6 +63,10 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
         if obj.get('no_display', False):
             continue  # Don't draw anything for objects that exceeded timeout
         
+        # Skip visualization for ghost-tracked objects (they're out of scene)
+        if obj.get('ghost_tracked', False):
+            continue  # Don't draw axes/lines for ghost-tracked objects
+        
         name = obj["name"]
         world_pts = obj["points"]
         color = color_map.get(name, (255, 255, 255))  # default to white
@@ -150,6 +154,10 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
         # Skip grasp points if no_display flag is set (timeout exceeded)
         if obj.get('no_display', False):
             continue  # Don't draw grasp points for objects that exceeded timeout
+        
+        # Skip grasp points for ghost-tracked objects (they're out of scene)
+        if obj.get('ghost_tracked', False):
+            continue  # Don't draw grasp points for ghost-tracked objects
         
         # Check if this model has grasp points data
         if model_name not in model_data or model_data[model_name]['grasp_points'] is None:

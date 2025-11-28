@@ -193,6 +193,77 @@ def load_grasp_points_data(json_file):
     return data['grasp_points']
 
 
+def validate_position_movement(object_pos_world, object_quat_world, prev_pos_world, prev_quat_world, 
+                                frames_since_last, robot_moving, fps=30.0):
+    """
+    Validate object movement between frames to filter outliers.
+    Rejects detections if the object has moved more than physically possible.
+    
+    Args:
+        object_pos_world: Current object position in world frame (3D vector)
+        object_quat_world: Current object orientation in world frame (quaternion)
+        prev_pos_world: Previous object position in world frame (3D vector) or None
+        prev_quat_world: Previous object orientation in world frame (quaternion) or None
+        frames_since_last: Number of frames since last detection (for multi-frame gaps)
+        robot_moving: Whether the robot is currently moving
+        fps: Frame rate (default 30 fps)
+    
+    Returns:
+        bool: True if movement is reasonable, False if outlier (moved too much)
+    """
+    # If no previous pose, accept this detection (first detection)
+    if prev_pos_world is None or prev_quat_world is None:
+        return True
+    
+    # Calculate time elapsed (accounting for frame gaps)
+    dt = frames_since_last / fps  # Time in seconds
+    
+    # Calculate position movement
+    position_diff = np.linalg.norm(object_pos_world - prev_pos_world)
+    
+    # Calculate rotation difference (quaternion angular distance)
+    quat_dot = np.abs(np.dot(object_quat_world, prev_quat_world))
+    quat_dot = np.clip(quat_dot, -1.0, 1.0)
+    rotation_diff = 2 * np.arccos(quat_dot)  # Angular distance in radians
+    
+    # Maximum allowed velocities (adjust based on your use case)
+    # These represent maximum physically possible movement speeds
+    if robot_moving:
+        # When robot is moving, objects can move faster (robot might be moving them)
+        MAX_VELOCITY = 2.0  # m/s - maximum linear velocity
+        MAX_ANGULAR_VELOCITY = 5.0  # rad/s - maximum angular velocity
+    else:
+        # When robot is stationary, objects should move very slowly (if at all)
+        MAX_VELOCITY = 0.5  # m/s - maximum linear velocity (objects shouldn't move much)
+        MAX_ANGULAR_VELOCITY = 2.0  # rad/s - maximum angular velocity
+    
+    # Calculate velocities
+    if dt > 0:
+        velocity = position_diff / dt
+        angular_velocity = rotation_diff / dt
+    else:
+        # If dt is 0 or very small, check absolute movement
+        velocity = position_diff * fps  # Approximate velocity
+        angular_velocity = rotation_diff * fps  # Approximate angular velocity
+    
+    # Reject if movement exceeds maximum possible velocity
+    if velocity > MAX_VELOCITY:
+        return False  # Moved too fast (outlier)
+    
+    if angular_velocity > MAX_ANGULAR_VELOCITY:
+        return False  # Rotated too fast (outlier)
+    
+    # Also check absolute movement thresholds (safety check for very large jumps)
+    MAX_ABSOLUTE_MOVEMENT = 0.3  # meters - reject if moved more than 30cm in one frame
+    if position_diff > MAX_ABSOLUTE_MOVEMENT:
+        return False  # Absolute movement too large (likely outlier)
+    
+    MAX_ABSOLUTE_ROTATION = 1.0  # radians (~57 degrees) - reject if rotated more than this
+    if rotation_diff > MAX_ABSOLUTE_ROTATION:
+        return False  # Absolute rotation too large (likely outlier)
+    
+    return True  # Movement is reasonable
+
 def calculate_scale_factor_from_aruco(corners, marker_size):
     """Calculate scale factor from ArUco marker pixel size"""
     if not corners:
@@ -431,7 +502,9 @@ def main():
     # Track which marker is currently active for each object (to prevent switching)
     active_markers = {}  # {model_name: marker_id}
     last_object_poses = {}  # {model_name: (object_tvec, object_rvec, frame_idx)} - for pose consistency checking
+    last_object_poses_world = {}  # {model_name: (object_pos_world, object_quat_world, frame_idx)} - for holding pose when out of scene
     previous_object_quaternions = {}  # {model_name: quaternion} - for SLERP smoothing
+    prev_object_poses_world = {}  # {model_name: (object_pos_world, object_quat_world, frame_idx)} - for movement-based outlier rejection
     
     
 
@@ -666,6 +739,10 @@ def main():
                     if frame_idx - prev_frame > 60:  # ~2 seconds at 30fps
                         del active_markers[model_name]
                         del last_object_poses[model_name]
+                        if model_name in last_object_poses_world:
+                            del last_object_poses_world[model_name]
+                        if model_name in prev_object_poses_world:
+                            del prev_object_poses_world[model_name]
                         if model_name in previous_object_quaternions:
                             del previous_object_quaternions[model_name]
         
@@ -681,6 +758,20 @@ def main():
                 object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
                 object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
                 
+                # Validate movement to filter outliers (check if moved too much)
+                prev_pos_world = None
+                prev_quat_world = None
+                frames_since_last = 1  # Default to 1 frame if no previous pose
+                if model_name in prev_object_poses_world:
+                    prev_pos_world, prev_quat_world, prev_frame = prev_object_poses_world[model_name]
+                    frames_since_last = frame_idx - prev_frame
+                
+                if not validate_position_movement(object_pos_world, object_quat_world, 
+                                                    prev_pos_world, prev_quat_world, 
+                                                    frames_since_last, robot_moving):
+                    # Skip this detection - moved too much (outlier)
+                    continue
+                
                 # Apply SLERP for smooth quaternion interpolation (reduces jitter)
                 SLERP_BLEND_FACTOR = 0.8  # 0.0 = use previous, 1.0 = use current (0.8 = 80% current, 20% previous)
                 if model_name in previous_object_quaternions:
@@ -691,6 +782,12 @@ def main():
                 # Update previous quaternion for next frame
                 previous_object_quaternions[model_name] = object_quat_world.copy()
                 
+                # Store last known world frame pose for ghost tracking (pose holding)
+                last_object_poses_world[model_name] = (object_pos_world.copy(), object_quat_world.copy(), frame_idx)
+                
+                # Store previous pose for movement-based outlier rejection
+                prev_object_poses_world[model_name] = (object_pos_world.copy(), object_quat_world.copy(), frame_idx)
+                
                 # Create final object
                 final_object = {
                     "name": model_name,
@@ -698,16 +795,56 @@ def main():
                     "position": object_pos_world,
                     "quaternion": object_quat_world,
                     'inferred': False,  # Always fresh detection (no ghost tracking)
+                    'ghost_tracked': False,  # Not ghost-tracked (fresh detection)
                     'no_display': False,  # Always display (no timeout)
                     "object_tvec": object_tvec,
                     "object_rvec": object_rvec
                 }
                 identified_jenga.append(final_object)
+        
+        # Ghost tracking: hold pose when objects go out of scene (frozen at last known value)
+        # Check for objects that were seen recently but not detected in current frame
+        GHOST_TRACKING_TIMEOUT = 90  # ~3 seconds at 30fps - how long to keep tracking after object leaves
+        for model_name in list(active_markers.keys()):
+            if model_name not in objects_seen_this_frame and model_name in last_object_poses_world:
+                prev_pos_world, prev_quat_world, prev_frame = last_object_poses_world[model_name]
+                frames_since_seen = frame_idx - prev_frame
+                
+                # Only ghost track if object was seen recently (within timeout)
+                if frames_since_seen <= GHOST_TRACKING_TIMEOUT:
+                    # Hold pose at last known value (no prediction, just freeze it)
+                    object_pos_world = prev_pos_world.copy()
+                    object_quat_world = prev_quat_world.copy()
+                    
+                    # Convert held world pose back to camera frame
+                    object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
+                    object_quat_cam = transform_orientation_world_to_cam(object_quat_world, cam_quat)
+                    object_rvec = quat_to_rvec(object_quat_cam)
+                    object_tvec = object_pos_cam
+                    
+                    # Create ghost-tracked object with held pose (no validation needed - we're holding the last known good pose)
+                    ghost_object = {
+                        "name": model_name,
+                        "points": [object_pos_world],
+                        "position": object_pos_world,
+                        "quaternion": object_quat_world,
+                        'inferred': True,  # Mark as inferred (ghost-tracked)
+                        'ghost_tracked': True,  # Mark as ghost-tracked
+                        'no_display': False,  # Still display text and publish topics
+                        "object_tvec": object_tvec,
+                        "object_rvec": object_rvec
+                    }
+                    identified_jenga.append(ghost_object)
                 
         objects = identified_jenga + detected_objects
 
         # Wireframe Mask Visualization for ArUco Objects (always enabled)
+        # Skip wireframe drawing for ghost-tracked objects (they're out of scene)
         for obj in identified_jenga:
+                # Skip wireframe for ghost-tracked objects
+                if obj.get('ghost_tracked', False):
+                    continue
+                
                 model_name = obj["name"]  # Now the name is just the model name
                 
                 if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
