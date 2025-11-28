@@ -13,6 +13,7 @@ transform_points_world_to_img, transform_point_world_to_cam, transform_orientati
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
+from aruco_camera_localizer.filter_config import FilterConfig
 import threading
 import rclpy
 import argparse
@@ -194,7 +195,7 @@ def load_grasp_points_data(json_file):
 
 
 def validate_position_movement(object_pos_world, object_quat_world, prev_pos_world, prev_quat_world, 
-                                frames_since_last, robot_moving, fps=30.0):
+                                frames_since_last, robot_moving, filter_config=None):
     """
     Validate object movement between frames to filter outliers.
     Rejects detections if the object has moved more than physically possible.
@@ -206,17 +207,21 @@ def validate_position_movement(object_pos_world, object_quat_world, prev_pos_wor
         prev_quat_world: Previous object orientation in world frame (quaternion) or None
         frames_since_last: Number of frames since last detection (for multi-frame gaps)
         robot_moving: Whether the robot is currently moving
-        fps: Frame rate (default 30 fps)
+        filter_config: FilterConfig instance (uses defaults if None)
     
     Returns:
         bool: True if movement is reasonable, False if outlier (moved too much)
     """
+    # Use default config if not provided
+    if filter_config is None:
+        filter_config = FilterConfig()
+    
     # If no previous pose, accept this detection (first detection)
     if prev_pos_world is None or prev_quat_world is None:
         return True
     
     # Calculate time elapsed (accounting for frame gaps)
-    dt = frames_since_last / fps  # Time in seconds
+    dt = frames_since_last / filter_config.movement_fps  # Time in seconds
     
     # Calculate position movement
     position_diff = np.linalg.norm(object_pos_world - prev_pos_world)
@@ -230,12 +235,12 @@ def validate_position_movement(object_pos_world, object_quat_world, prev_pos_wor
     # These represent maximum physically possible movement speeds
     if robot_moving:
         # When robot is moving, objects can move faster (robot might be moving them)
-        MAX_VELOCITY = 2.0  # m/s - maximum linear velocity
-        MAX_ANGULAR_VELOCITY = 5.0  # rad/s - maximum angular velocity
+        MAX_VELOCITY = filter_config.movement_max_velocity_moving
+        MAX_ANGULAR_VELOCITY = filter_config.movement_max_angular_velocity_moving
     else:
         # When robot is stationary, objects should move very slowly (if at all)
-        MAX_VELOCITY = 0.5  # m/s - maximum linear velocity (objects shouldn't move much)
-        MAX_ANGULAR_VELOCITY = 2.0  # rad/s - maximum angular velocity
+        MAX_VELOCITY = filter_config.movement_max_velocity_stationary
+        MAX_ANGULAR_VELOCITY = filter_config.movement_max_angular_velocity_stationary
     
     # Calculate velocities
     if dt > 0:
@@ -243,8 +248,8 @@ def validate_position_movement(object_pos_world, object_quat_world, prev_pos_wor
         angular_velocity = rotation_diff / dt
     else:
         # If dt is 0 or very small, check absolute movement
-        velocity = position_diff * fps  # Approximate velocity
-        angular_velocity = rotation_diff * fps  # Approximate angular velocity
+        velocity = position_diff * filter_config.movement_fps  # Approximate velocity
+        angular_velocity = rotation_diff * filter_config.movement_fps  # Approximate angular velocity
     
     # Reject if movement exceeds maximum possible velocity
     if velocity > MAX_VELOCITY:
@@ -254,12 +259,10 @@ def validate_position_movement(object_pos_world, object_quat_world, prev_pos_wor
         return False  # Rotated too fast (outlier)
     
     # Also check absolute movement thresholds (safety check for very large jumps)
-    MAX_ABSOLUTE_MOVEMENT = 0.3  # meters - reject if moved more than 30cm in one frame
-    if position_diff > MAX_ABSOLUTE_MOVEMENT:
+    if position_diff > filter_config.movement_max_absolute_movement:
         return False  # Absolute movement too large (likely outlier)
     
-    MAX_ABSOLUTE_ROTATION = 1.0  # radians (~57 degrees) - reject if rotated more than this
-    if rotation_diff > MAX_ABSOLUTE_ROTATION:
+    if rotation_diff > filter_config.movement_max_absolute_rotation:
         return False  # Absolute rotation too large (likely outlier)
     
     return True  # Movement is reasonable
@@ -399,6 +402,10 @@ def main():
     args = parse_args()
     # Set headless mode early to suppress all logging
     headless_mode = args.headless
+    
+    # Create filter configuration
+    filter_config = FilterConfig()
+    
     bridge_node = start_ros_node(args.image_topic)
     
     # Create camera matrix based on mode (sim mode uses image topic)
@@ -556,10 +563,10 @@ def main():
     detected_objects = []
     # Robot movement tracking for minimum z selection
     prev_ee_pos = None
-    robot_slow_movement_threshold = 0.01  # meters - 10mm threshold for slow movement detection
+    robot_slow_movement_threshold = filter_config.robot_slow_movement_threshold
     # Track how long the arm has been stationary (to handle motion blur after movement stops)
     frames_stationary = 0  # Number of consecutive frames the arm has been stationary
-    stationary_settle_time = 30  # frames - ~1 second at 30fps - time to wait after movement stops before trusting previous values
+    stationary_settle_time = filter_config.stationary_settle_time
     
     while True:
         if use_ros_topic:
@@ -606,7 +613,8 @@ def main():
         # Aruco Section - Now using aruco_localizer objects
         corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
         estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, TOTAL_MARKER_SIZE,
-                    kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk, robot_moving=robot_moving)
+                    kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, 
+                    filter_config=filter_config, talk=talk, robot_moving=robot_moving)
         
         
         # Calculate scale factor from ArUco marker detection
@@ -623,17 +631,24 @@ def main():
         candidate_markers = {}  # {model_name: [(marker_id, object_tvec, object_rvec, quality, distance), ...]}
         
         for marker_id in detected_marker_ids:
-            if marker_id in kalman_filters and marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
+            if marker_id in marker_stabilities and marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
                 model_name = marker_annotations[marker_id]['model_name']
                 
                 stability = marker_stabilities[marker_id]
-                kalman = kalman_filters[marker_id]
                 
-                # Use Kalman filter's smoothed state instead of raw measurements
+                # Use Kalman filter's smoothed state if enabled, otherwise use confirmed pose
                 # Only use if it was updated in the current frame
                 if stability.get("last_frame") == frame_idx and stability.get("confirmed_tvec") is not None:
-                    # Get smoothed pose from Kalman filter (after correction)
-                    tvec, rvec = kalman.get_state()
+                    if filter_config.enable_kalman_filter and marker_id in kalman_filters:
+                        # Get smoothed pose from Kalman filter (after correction)
+                        kalman = kalman_filters[marker_id]
+                        tvec, rvec = kalman.get_state()
+                    else:
+                        # Use confirmed pose directly when Kalman is disabled
+                        tvec = stability.get("confirmed_tvec")
+                        rvec = stability.get("confirmed_rvec")
+                        if tvec is None or rvec is None:
+                            continue
                 else:
                     # Skip if not detected in current frame
                     continue
@@ -651,11 +666,11 @@ def main():
                 distance = np.linalg.norm(object_tvec)
                 quality = stability.get("measurement_quality", 0.5)
                 
-                # Quality threshold: reject low-quality detections
-                MIN_QUALITY_THRESHOLD = 0.3  # Reject if quality < 0.3 (~3.5 pixel RMS error)
-                if quality < MIN_QUALITY_THRESHOLD:
-                    # Skip low-quality marker detection
-                    continue
+                # Quality threshold filter: reject low-quality detections
+                if filter_config.enable_quality_threshold:
+                    if quality < filter_config.min_quality_threshold:
+                        # Skip low-quality marker detection
+                        continue
                 
                 # Store candidate marker
                 if model_name not in candidate_markers:
@@ -698,8 +713,12 @@ def main():
                         rotation_diff = 2 * np.arccos(quat_dot)
                         
                         # Adaptive thresholds based on robot movement
-                        MAX_POSITION_DIFF = 0.15 if robot_moving else 0.08  # 15cm moving, 8cm stationary
-                        MAX_ROTATION_DIFF = 0.5 if robot_moving else 0.3   # ~29deg moving, ~17deg stationary
+                        if robot_moving:
+                            MAX_POSITION_DIFF = filter_config.pose_consistency_max_position_diff_moving
+                            MAX_ROTATION_DIFF = filter_config.pose_consistency_max_rotation_diff_moving
+                        else:
+                            MAX_POSITION_DIFF = filter_config.pose_consistency_max_position_diff_stationary
+                            MAX_ROTATION_DIFF = filter_config.pose_consistency_max_rotation_diff_stationary
                         
                         # If pose differs too much, current marker might be lost/occluded - switch
                         if position_diff > MAX_POSITION_DIFF or rotation_diff > MAX_ROTATION_DIFF:
@@ -736,7 +755,7 @@ def main():
                 # Object not detected - clear active marker after some time
                 if model_name in last_object_poses:
                     prev_tvec, prev_rvec, prev_frame = last_object_poses[model_name]
-                    if frame_idx - prev_frame > 60:  # ~2 seconds at 30fps
+                    if frame_idx - prev_frame > filter_config.pose_consistency_clear_timeout:
                         del active_markers[model_name]
                         del last_object_poses[model_name]
                         if model_name in last_object_poses_world:
@@ -758,26 +777,30 @@ def main():
                 object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
                 object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
                 
-                # Validate movement to filter outliers (check if moved too much)
-                prev_pos_world = None
-                prev_quat_world = None
-                frames_since_last = 1  # Default to 1 frame if no previous pose
-                if model_name in prev_object_poses_world:
-                    prev_pos_world, prev_quat_world, prev_frame = prev_object_poses_world[model_name]
-                    frames_since_last = frame_idx - prev_frame
+                # Movement validation filter: check if moved too much
+                if filter_config.enable_movement_validation:
+                    prev_pos_world = None
+                    prev_quat_world = None
+                    frames_since_last = 1  # Default to 1 frame if no previous pose
+                    if model_name in prev_object_poses_world:
+                        prev_pos_world, prev_quat_world, prev_frame = prev_object_poses_world[model_name]
+                        frames_since_last = frame_idx - prev_frame
+                    
+                    if not validate_position_movement(object_pos_world, object_quat_world, 
+                                                        prev_pos_world, prev_quat_world, 
+                                                        frames_since_last, robot_moving, filter_config=filter_config):
+                        # Skip this detection - moved too much (outlier)
+                        continue
                 
-                if not validate_position_movement(object_pos_world, object_quat_world, 
-                                                    prev_pos_world, prev_quat_world, 
-                                                    frames_since_last, robot_moving):
-                    # Skip this detection - moved too much (outlier)
-                    continue
+                # SLERP smoothing filter: smooth quaternion interpolation (reduces jitter)
+                if filter_config.enable_slerp_smoothing:
+                    if model_name in previous_object_quaternions:
+                        prev_quat_world = previous_object_quaternions[model_name]
+                        # SLERP between previous and current quaternion for smooth transition
+                        object_quat_world = slerp_quat(prev_quat_world, object_quat_world, blend=filter_config.slerp_blend_factor)
                 
-                # Apply SLERP for smooth quaternion interpolation (reduces jitter)
-                SLERP_BLEND_FACTOR = 0.8  # 0.0 = use previous, 1.0 = use current (0.8 = 80% current, 20% previous)
-                if model_name in previous_object_quaternions:
-                    prev_quat_world = previous_object_quaternions[model_name]
-                    # SLERP between previous and current quaternion for smooth transition
-                    object_quat_world = slerp_quat(prev_quat_world, object_quat_world, blend=SLERP_BLEND_FACTOR)
+                # Update previous quaternion for next frame (always update for consistency)
+                previous_object_quaternions[model_name] = object_quat_world.copy()
                 
                 # Update previous quaternion for next frame
                 previous_object_quaternions[model_name] = object_quat_world.copy()
@@ -802,39 +825,69 @@ def main():
                 }
                 identified_jenga.append(final_object)
         
-        # Ghost tracking: hold pose when objects go out of scene (frozen at last known value)
+        # Ghost tracking filter: hold pose when markers are not detected (use confirmed pose from marker stability)
         # Check for objects that were seen recently but not detected in current frame
-        GHOST_TRACKING_TIMEOUT = 90  # ~3 seconds at 30fps - how long to keep tracking after object leaves
-        for model_name in list(active_markers.keys()):
-            if model_name not in objects_seen_this_frame and model_name in last_object_poses_world:
-                prev_pos_world, prev_quat_world, prev_frame = last_object_poses_world[model_name]
-                frames_since_seen = frame_idx - prev_frame
-                
-                # Only ghost track if object was seen recently (within timeout)
-                if frames_since_seen <= GHOST_TRACKING_TIMEOUT:
-                    # Hold pose at last known value (no prediction, just freeze it)
-                    object_pos_world = prev_pos_world.copy()
-                    object_quat_world = prev_quat_world.copy()
+        if filter_config.enable_ghost_tracking:
+            for model_name in list(active_markers.keys()):
+                if model_name not in objects_seen_this_frame and model_name in last_object_poses_world:
+                    prev_pos_world, prev_quat_world, prev_frame = last_object_poses_world[model_name]
+                    frames_since_seen = frame_idx - prev_frame
                     
-                    # Convert held world pose back to camera frame
-                    object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
-                    object_quat_cam = transform_orientation_world_to_cam(object_quat_world, cam_quat)
-                    object_rvec = quat_to_rvec(object_quat_cam)
-                    object_tvec = object_pos_cam
-                    
-                    # Create ghost-tracked object with held pose (no validation needed - we're holding the last known good pose)
-                    ghost_object = {
-                        "name": model_name,
-                        "points": [object_pos_world],
-                        "position": object_pos_world,
-                        "quaternion": object_quat_world,
-                        'inferred': True,  # Mark as inferred (ghost-tracked)
-                        'ghost_tracked': True,  # Mark as ghost-tracked
-                        'no_display': False,  # Still display text and publish topics
-                        "object_tvec": object_tvec,
-                        "object_rvec": object_rvec
-                    }
-                    identified_jenga.append(ghost_object)
+                    # Only ghost track if object was seen recently (within timeout)
+                    if frames_since_seen <= filter_config.ghost_tracking_timeout:
+                        # Try to use confirmed pose from marker stability if available
+                        marker_id = active_markers.get(model_name)
+                        use_confirmed_pose = False
+                        
+                        if marker_id is not None and marker_id in marker_stabilities:
+                            stability = marker_stabilities[marker_id]
+                            # Use confirmed pose if marker is still confirmed (even if not detected this frame)
+                            if stability.get("confirmed", False) and stability.get("confirmed_tvec") is not None:
+                                confirmed_tvec = stability["confirmed_tvec"]
+                                confirmed_rvec = stability["confirmed_rvec"]
+                                
+                                # Get object pose from confirmed marker pose
+                                if marker_id in marker_annotations:
+                                    marker_annotation = marker_annotations[marker_id]['annotation']
+                                    try:
+                                        object_tvec_cam, object_rvec_cam = estimate_object_pose_from_marker(
+                                            (confirmed_tvec, confirmed_rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
+                                        )
+                                        
+                                        # Convert to world frame
+                                        object_quat_cam = rvec_to_quat(object_rvec_cam)
+                                        object_pos_world = transform_point_cam_to_world(object_tvec_cam, cam_pos, cam_quat)
+                                        object_quat_world = transform_orientation_cam_to_world(object_quat_cam, cam_quat)
+                                        
+                                        use_confirmed_pose = True
+                                    except ValueError:
+                                        # Fall back to last known pose if annotation is invalid
+                                        pass
+                        
+                        if not use_confirmed_pose:
+                            # Fall back to last known world pose (no prediction, just freeze it)
+                            object_pos_world = prev_pos_world.copy()
+                            object_quat_world = prev_quat_world.copy()
+                        
+                        # Convert held world pose back to camera frame
+                        object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
+                        object_quat_cam = transform_orientation_world_to_cam(object_quat_world, cam_quat)
+                        object_rvec = quat_to_rvec(object_quat_cam)
+                        object_tvec = object_pos_cam
+                        
+                        # Create ghost-tracked object with held pose (no validation needed - we're holding the last known good pose)
+                        ghost_object = {
+                            "name": model_name,
+                            "points": [object_pos_world],
+                            "position": object_pos_world,
+                            "quaternion": object_quat_world,
+                            'inferred': True,  # Mark as inferred (ghost-tracked)
+                            'ghost_tracked': True,  # Mark as ghost-tracked
+                            'no_display': False,  # Still display text and publish topics
+                            "object_tvec": object_tvec,
+                            "object_rvec": object_rvec
+                        }
+                        identified_jenga.append(ghost_object)
                 
         objects = identified_jenga + detected_objects
 
