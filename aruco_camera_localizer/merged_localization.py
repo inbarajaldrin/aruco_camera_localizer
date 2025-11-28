@@ -4,16 +4,15 @@ import numpy as np
 import json
 import os
 import time
-from datetime import datetime
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-transform_points_world_to_img, transform_point_world_to_cam, transform_orientation_world_to_cam, slerp_quat
+transform_points_world_to_img, transform_point_world_to_cam, transform_orientation_world_to_cam
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points, draw_marker_axes
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
 import threading
 import rclpy
 import argparse
@@ -94,12 +93,12 @@ def estimate_object_pose_from_marker(marker_pose, aruco_annotation, cam_pos=None
     Returns position (tvec) and orientation (rvec) as rotation vector.
     
     Note: OpenCV's solvePnP returns marker pose in camera frame, but the marker's
-    coordinate frame convention may differ from the CAD model. The T_marker_to_object
-    from JSON is in the CAD marker frame, so we need to ensure proper transformation.
+    coordinate frame convention may differ from the CAD model. The JSON format uses
+    T_object_to_marker which is inverted to get T_marker_to_object for pose estimation.
     
     Args:
         marker_pose: Tuple of (marker_tvec, marker_rvec) in camera frame
-        aruco_annotation: Dictionary with marker annotation data from JSON
+        aruco_annotation: Dictionary with marker annotation data from JSON (must contain T_object_to_marker)
         cam_pos: Optional camera position in world frame (for surface_normal verification)
         cam_quat: Optional camera orientation in world frame (for surface_normal verification)
     """
@@ -112,65 +111,33 @@ def estimate_object_pose_from_marker(marker_pose, aruco_annotation, cam_pos=None
     marker_tvec = marker_tvec.flatten()
     
     # Get the marker's transformation to object center from annotation
-    # Support both T_marker_to_object and T_object_to_marker formats
-    if 'T_object_to_marker' in aruco_annotation:
-        # New format: T_object_to_marker (from object to marker)
-        # Need to invert to get T_marker_to_object
-        obj_to_marker_data = aruco_annotation['T_object_to_marker']
-        
-        # Get position and rotation from object to marker
-        t_obj_to_marker = np.array([
-            obj_to_marker_data['position']['x'],
-            obj_to_marker_data['position']['y'], 
-            obj_to_marker_data['position']['z']
-        ])
-        
-        obj_to_marker_rot = obj_to_marker_data['rotation']
-        
-        # Prefer quaternion if available, otherwise use Euler angles
-        if 'quaternion' in obj_to_marker_rot:
-            quat = obj_to_marker_rot['quaternion']
-            quat_array = np.array([quat['x'], quat['y'], quat['z'], quat['w']])  # scipy uses x, y, z, w
-            R_obj_to_marker = R.from_quat(quat_array).as_matrix()
-        else:
-            # Fall back to Euler angles if quaternion not available
-            R_obj_to_marker = euler_to_rotation_matrix(
-                obj_to_marker_rot['roll'], obj_to_marker_rot['pitch'], obj_to_marker_rot['yaw']
-            )
-        
-        # Invert to get T_marker_to_object
-        R_marker_to_obj = R_obj_to_marker.T
-        t_marker_to_obj = -R_marker_to_obj @ t_obj_to_marker
-        
-    elif 'T_marker_to_object' in aruco_annotation:
-        # Old format: T_marker_to_object (from marker to object) - use directly
-        marker_to_obj_data = aruco_annotation['T_marker_to_object']
-        
-        # Get object center position in marker frame (CAD convention)
-        t_marker_to_obj = np.array([
-            marker_to_obj_data['position']['x'],
-            marker_to_obj_data['position']['y'], 
-            marker_to_obj_data['position']['z']
-        ])
-        
-        # Get rotation from marker frame to object frame (CAD convention)
-        marker_rot = marker_to_obj_data['rotation']
-        
-        # Prefer quaternion if available, otherwise use Euler angles
-        if 'quaternion' in marker_rot:
-            quat = marker_rot['quaternion']
-            quat_array = np.array([quat['x'], quat['y'], quat['z'], quat['w']])  # scipy uses x, y, z, w
-            R_marker_to_obj = R.from_quat(quat_array).as_matrix()
-        else:
-            # Fall back to Euler angles if quaternion not available
-            R_marker_to_obj = euler_to_rotation_matrix(
-                marker_rot['roll'], marker_rot['pitch'], marker_rot['yaw']
-            )
-    else:
+    # JSON format: T_object_to_marker (from object to marker)
+    # Need to invert to get T_marker_to_object
+    if 'T_object_to_marker' not in aruco_annotation:
         raise ValueError(
-            f"Invalid JSON format! Marker ID {aruco_annotation.get('aruco_id', 'unknown')} missing required 'T_marker_to_object' or 'T_object_to_marker' field. "
+            f"Invalid JSON format! Marker ID {aruco_annotation.get('aruco_id', 'unknown')} missing required 'T_object_to_marker' field. "
             f"Available keys: {list(aruco_annotation.keys())}"
         )
+    
+    obj_to_marker_data = aruco_annotation['T_object_to_marker']
+    
+    # Get position and rotation from object to marker
+    t_obj_to_marker = np.array([
+        obj_to_marker_data['position']['x'],
+        obj_to_marker_data['position']['y'], 
+        obj_to_marker_data['position']['z']
+    ])
+    
+    obj_to_marker_rot = obj_to_marker_data['rotation']
+    
+    # Use quaternion from JSON (quaternions are always available)
+    quat = obj_to_marker_rot['quaternion']
+    quat_array = np.array([quat['x'], quat['y'], quat['z'], quat['w']])  # scipy uses x, y, z, w
+    R_obj_to_marker = R.from_quat(quat_array).as_matrix()
+    
+    # Invert to get T_marker_to_object
+    R_marker_to_obj = R_obj_to_marker.T
+    t_marker_to_obj = -R_marker_to_obj @ t_obj_to_marker
     
     # Build homogeneous transformation matrices
     # T_camera_to_marker: Marker pose in camera frame (4x4)
@@ -204,19 +171,6 @@ def estimate_object_pose_from_marker(marker_pose, aruco_annotation, cam_pos=None
     object_rvec, _ = cv2.Rodrigues(object_rotation_matrix)
     
     return object_tvec, object_rvec
-
-def euler_to_rotation_matrix(roll, pitch, yaw):
-    """Convert Euler angles (roll, pitch, yaw) to rotation matrix.
-    
-    Uses xyz intrinsic order to match JSON creation convention:
-    - JSON created with: THREE.js Euler(roll, pitch, yaw, 'XYZ') which uses intrinsic xyz
-    - This is intrinsic rotation (rotations about moving axes): apply roll first, then pitch, then yaw
-    - Equivalent to scipy's 'xyz' intrinsic order
-    """
-    # Use scipy intrinsic xyz to match how JSON was created (THREE.js convention)
-    # THREE.js: apply roll about X, then pitch about rotated Y, then yaw about rotated Z
-    rotation = R.from_euler('xyz', [roll, pitch, yaw], degrees=False)
-    return rotation.as_matrix()
 
 def quat_to_rvec(quat):
     """Convert quaternion to rotation vector"""
@@ -366,8 +320,6 @@ def parse_args():
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     parser.add_argument("--headless", action='store_true',
                         help="Run in headless mode: no OpenCV window, no logging, but annotated stream still published.")
-    parser.add_argument("--debug-record", action='store_true',
-                        help="Record debug data to JSON file for analysis of prediction fluctuations.")
     return parser.parse_args()
 
 
@@ -413,8 +365,6 @@ def main():
     model_data = {}
     marker_annotations = {}
     
-    if not headless_mode:
-        print(f"DEBUG: About to load models: {available_models}")
     
     for model_name in available_models:
         aruco_annotations_file = data_dir / "aruco" / f"{model_name}_aruco.json"
@@ -462,9 +412,6 @@ def main():
                 'grasp_points': grasp_points
             }
             
-            if not headless_mode:
-                print(f"Loaded {model_name}: {len(aruco_annotations)} markers")
-                print(f"DEBUG: Added {model_name} to model_data")
         except Exception as e:
             if not headless_mode:
                 print(f"Error loading model {model_name}: {e}")
@@ -475,39 +422,13 @@ def main():
             print("No model data loaded successfully")
         return
     
-    if not headless_mode:
-        print(f"Total markers to track: {len(marker_annotations)}")
-        print(f"DEBUG: Final model_data keys: {list(model_data.keys())}")
-        print(f"Marker IDs: {sorted(marker_annotations.keys())}")
 
     kalman_filters = {}
     marker_stabilities = {}
     last_seen_frames = {}
     frame_idx = 0
     
-    # Marker axis display mode: 0=off, 1=on (object axes always shown via draw_object_lines)
-    axis_display_mode = 1  # Default: show marker axes
     
-    # Wireframe display mode: 0=off, 1=on
-    wireframe_display_mode = 1  # Default: show wireframe
-    
-    # Temporal smoothing for fused object poses
-    object_pose_history = {}  # {model_name: {'tvec': prev_tvec, 'rvec': prev_rvec, 'tvec_world': prev_tvec_world, 'rvec_world': prev_rvec_world, 'last_fresh_frame': frame_idx}}
-    # Track when objects were last seen with fresh detections (not all ghost)
-    object_last_fresh_frame = {}  # {model_name: last_frame_with_fresh_detections}
-    
-    # Smoothing factor - adjust based on whether we have fresh detections or ghost data
-    # When we have fresh detections: use high alpha (very responsive, real-time feedback)
-    # When we have ghost data: use lower alpha (more stable, prevent flickering)
-    smoothing_alpha_fresh = 0.8  # When all detections are fresh (80% new, 20% old - very responsive)
-    smoothing_alpha_ghost = 0.2  # When using ghost data (20% new, 80% old - more stable)
-    smoothing_alpha_stationary_ghost = 0.05  # When stationary and using ghost (5% new, 95% old - very stable)
-    
-    # Timeout for ghost tracking - after this time, stop displaying wireframe but continue tracking/publishing
-    # Set to 2 seconds for both stationary and moving cases
-    # After timeout: objects are still tracked and pose is published, but wireframe is not displayed
-    ghost_tracking_timeout_stationary = 60  # frames - 2 seconds at 30fps
-    ghost_tracking_timeout_moving = 60  # frames - 2 seconds at 30fps
 
     # Determine input source
     use_ros_topic = args.image_topic is not None
@@ -553,8 +474,6 @@ def main():
     parameters = aruco.DetectorParameters()
     if not headless_mode:
         print("Press 'q' to quit.")
-        print("Press 'a' to toggle marker axes (Object axes always shown via draw_object_lines)")
-        print("Press 'w' to toggle wireframe and grasp points display")
 
     detected_objects = []
     # Robot movement tracking for minimum z selection
@@ -563,14 +482,6 @@ def main():
     # Track how long the arm has been stationary (to handle motion blur after movement stops)
     frames_stationary = 0  # Number of consecutive frames the arm has been stationary
     stationary_settle_time = 30  # frames - ~1 second at 30fps - time to wait after movement stops before trusting previous values
-    
-    # Debug recording setup
-    debug_data = [] if args.debug_record else None
-    debug_start_time = time.time() if args.debug_record else None
-    if args.debug_record:
-        debug_file = Path(__file__).parent.parent / f"debug_recording_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        if not headless_mode:
-            print(f"Debug recording enabled. Data will be saved to: {debug_file}")
     
     while True:
         if use_ros_topic:
@@ -625,12 +536,13 @@ def main():
 
         # Process confirmed markers and convert to object poses (one marker per object)
         # Use the first marker found for each object type
-        object_detections = {}  # {model_name: (object_tvec, object_rvec, distance, marker_id, is_ghost)}
-        marker_poses_for_drawing = {}  # {marker_id: (tvec, rvec)} for axis visualization
+        object_detections = {}  # {model_name: (object_tvec, object_rvec, distance, marker_id)}
         
-        # Process all confirmed markers (including those in ghost tracking) and convert to object poses
-        for marker_id in kalman_filters:
-            if marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
+        # Only process markers that are actually detected in the current frame (no ghost tracking)
+        detected_marker_ids = set(int(id_val) for id_val in ids) if ids is not None else set()
+        
+        for marker_id in detected_marker_ids:
+            if marker_id in kalman_filters and marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
                 model_name = marker_annotations[marker_id]['model_name']
                 
                 # Skip if we already have a detection for this object
@@ -638,29 +550,15 @@ def main():
                     continue
                 
                 stability = marker_stabilities[marker_id]
-                frames_missing = stability.get("frames_missing", 0)
-                is_ghost = frames_missing > 0  # True if marker is in ghost tracking mode
                 
-                # For ghost tracking, use last known world pose and convert back to camera frame
-                if is_ghost and stability.get("last_known_tvec_world") is not None:
-                    # Use last known world pose (objects don't move)
-                    marker_pos_world = stability["last_known_tvec_world"]
-                    marker_quat_world = stability["last_known_rvec_world"]
-                    
-                    # Convert back to camera frame for object pose estimation
-                    marker_tvec_cam = transform_point_world_to_cam(marker_pos_world, cam_pos, cam_quat)
-                    marker_quat_cam = transform_orientation_world_to_cam(marker_quat_world, cam_quat)
-                    marker_rvec_cam = quat_to_rvec(marker_quat_cam)
-                    
-                    tvec, rvec = marker_tvec_cam, marker_rvec_cam
+                # Use current frame's detection directly (from stability, updated in current frame)
+                # Only use if it was updated in the current frame
+                if stability.get("last_frame") == frame_idx and stability.get("confirmed_tvec") is not None:
+                    tvec = stability["confirmed_tvec"]
+                    rvec = stability["confirmed_rvec"]
                 else:
-                    # Use normal measurement (detected or Kalman prediction)
-                    use_kalman_filter = False  # Set to True to use Kalman filter predictions
-                    
-                    if use_kalman_filter:
-                        tvec, rvec = kalman_filters[marker_id].predict()
-                    else:
-                        tvec, rvec = kalman_filters[marker_id].get_raw_measurement()
+                    # Skip if not detected in current frame
+                    continue
                 
                 # Get object pose from marker pose
                 marker_annotation = marker_annotations[marker_id]['annotation']
@@ -670,189 +568,43 @@ def main():
                     )
                 except ValueError as e:
                     # Skip markers with old/invalid JSON format
-                    if talk and frame_idx % 30 == 0:
-                        print(f"[{model_name}] Skipping marker {marker_id}: {str(e)[:80]}...")
                     continue
                 
                 distance = np.linalg.norm(object_tvec)
                 
                 # Store detection for this object
-                object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id, is_ghost)
-                
-                # Store marker pose for axis visualization
-                marker_poses_for_drawing[marker_id] = (tvec, rvec)
+                object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id)
         
         # Process each object detection
-        for model_name, (object_tvec, object_rvec, distance, marker_id, is_ghost) in object_detections.items():
+        for model_name, (object_tvec, object_rvec, distance, marker_id) in object_detections.items():
             # Check if pose is valid
             if (object_tvec is not None and object_rvec is not None and 
                 not np.any(np.isnan(object_tvec)) and not np.any(np.isnan(object_rvec))):
                 
-                # Adjust smoothing based on whether we have fresh detection or ghost data
-                # When we have fresh detection: use high alpha for real-time feedback
-                # When we have ghost data: use lower alpha to prevent flickering
-                # Special handling: when arm just stopped moving, prefer fresh detections (motion blur)
-                
-                # Check timeout if detection is ghost
-                # After timeout, mark as no_display (no wireframe) but continue tracking/publishing
-                timeout_exceeded = False
-                if is_ghost and model_name in object_last_fresh_frame:
-                    last_fresh = object_last_fresh_frame[model_name]
-                    frames_since_fresh = frame_idx - last_fresh
-                    
-                    # Determine timeout based on robot movement state
-                    if robot_moving:
-                        timeout = ghost_tracking_timeout_moving
-                    else:
-                        timeout = ghost_tracking_timeout_stationary
-                    
-                    # If object has been ghost for too long, mark as no_display
-                    if frames_since_fresh > timeout:
-                        timeout_exceeded = True
-                        if talk and frame_idx % 30 == 0 and not headless_mode:
-                            print(f"[{model_name}] Timeout: marker ghost for {frames_since_fresh} frames (timeout={timeout}) - stopping wireframe display, continuing pose tracking")
-                
-                if is_ghost:
-                    # Using ghost data - be more conservative to prevent flickering
-                    if just_stopped_moving:
-                        # Arm just stopped - prefer fresh detections even if using ghost (motion blur period)
-                        # Use higher alpha to quickly update pose after movement stops
-                        smoothing_alpha = smoothing_alpha_ghost * 2.0  # Double the ghost alpha (40% new, 60% old)
-                        smoothing_alpha = min(smoothing_alpha, 0.5)  # Cap at 50% to avoid too much noise
-                    elif not robot_moving:
-                        # Arm has been stationary for a while - be very conservative
-                        smoothing_alpha = smoothing_alpha_stationary_ghost
-                    else:
-                        # When moving and using ghost, still conservative but less so
-                        smoothing_alpha = smoothing_alpha_ghost
-                else:
-                    # Fresh detection
-                    if just_stopped_moving:
-                        # Arm just stopped - prefer fresh detections strongly (motion blur period)
-                        # Use very high alpha to quickly get accurate pose after movement stops
-                        smoothing_alpha = 0.9  # 90% new, 10% old - very responsive
-                    else:
-                        # Normal fresh detection - use high alpha for real-time feedback
-                        smoothing_alpha = smoothing_alpha_fresh
-                
-                # Apply temporal smoothing to pose
-                if model_name in object_pose_history:
-                    prev_tvec = object_pose_history[model_name]['tvec']
-                    prev_rvec = object_pose_history[model_name]['rvec']
-                    
-                    # Smooth position (linear interpolation)
-                    smoothed_tvec = smoothing_alpha * object_tvec + (1 - smoothing_alpha) * prev_tvec
-                    
-                    # Smooth rotation (quaternion slerp)
-                    object_quat = rvec_to_quat(object_rvec)
-                    prev_quat = rvec_to_quat(prev_rvec)
-                    smoothed_quat = slerp_quat(prev_quat, object_quat, smoothing_alpha)
-                    smoothed_rvec = quat_to_rvec(smoothed_quat)
-                else:
-                    # First detection - use pose directly (no smoothing)
-                    smoothed_tvec, smoothed_rvec = object_tvec, object_rvec
-                    smoothed_quat = rvec_to_quat(smoothed_rvec)
-                
+                # Use raw pose directly (no temporal smoothing, no Kalman filtering)
                 # Convert to world frame
-                object_pos_world = transform_point_cam_to_world(smoothed_tvec, cam_pos, cam_quat)
-                object_quat_world = transform_orientation_cam_to_world(smoothed_quat, cam_quat)
-                
-                # Update pose history for next frame (store both camera and world frames)
-                object_pose_history[model_name] = {
-                    'tvec': smoothed_tvec.copy(),
-                    'rvec': smoothed_rvec.copy(),
-                    'tvec_world': object_pos_world.copy(),
-                    'rvec_world': object_quat_world.copy(),
-                    'last_fresh_frame': frame_idx
-                }
-                
-                # Update last fresh frame if we have fresh detection (not ghost)
-                if not is_ghost:
-                    object_last_fresh_frame[model_name] = frame_idx
-                elif model_name not in object_last_fresh_frame:
-                    # First time seeing this object, even if ghost, record it
-                    object_last_fresh_frame[model_name] = frame_idx
+                object_quat = rvec_to_quat(object_rvec)
+                object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
+                object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
                 
                 # Create final object
-                # Mark as no_display if timeout exceeded (no wireframe/grasp points, but still publish pose)
                 final_object = {
                     "name": model_name,
                     "points": [object_pos_world],
                     "position": object_pos_world,
                     "quaternion": object_quat_world,
-                    'inferred': is_ghost,  # Mark as inferred if marker is ghost
-                    'no_display': timeout_exceeded,  # Mark as no_display if timeout exceeded (no wireframe/grasp)
-                    "object_tvec": smoothed_tvec,
-                    "object_rvec": smoothed_rvec
+                    'inferred': False,  # Always fresh detection (no ghost tracking)
+                    'no_display': False,  # Always display (no timeout)
+                    "object_tvec": object_tvec,
+                    "object_rvec": object_rvec
                 }
                 identified_jenga.append(final_object)
                 
-                if talk and frame_idx % 30 == 0:  # Only print every 30 frames
-                    if not headless_mode:
-                        status = "(ghost)" if is_ghost else ""
-                        print(f"[{model_name}] From marker {marker_id} {status} - Distance: {distance:.3f}m")
-                        print(f"  Pos: {object_pos_world}")
-                        print(f"  Quat: {object_quat_world}")
-        
-        # Handle objects that were previously detected but are now missing
-        # Use previous known poses when detections are completely missing
-        # After timeout, mark as no_display but continue tracking/publishing
-        for model_name in list(object_pose_history.keys()):
-            if model_name not in object_detections:
-                # Object was detected before but not in current frame
-                prev_pose = object_pose_history[model_name]
-                last_fresh = object_last_fresh_frame.get(model_name, frame_idx)
-                frames_since_fresh = frame_idx - last_fresh
-                
-                # Determine timeout based on robot movement state
-                if robot_moving:
-                    timeout = ghost_tracking_timeout_moving
-                else:
-                    timeout = ghost_tracking_timeout_stationary
-                
-                # Check if timeout exceeded - mark as no_display but continue tracking
-                timeout_exceeded = frames_since_fresh > timeout
-                
-                # Always continue tracking and publishing, even after timeout
-                if prev_pose.get('tvec_world') is not None:
-                    # Use previous world pose directly (objects don't move)
-                    object_pos_world = prev_pose['tvec_world'].copy()
-                    object_quat_world = prev_pose['rvec_world'].copy()
-                    
-                    # Convert back to camera frame for consistency
-                    object_tvec_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
-                    object_quat_cam = transform_orientation_world_to_cam(object_quat_world, cam_quat)
-                    object_rvec_cam = quat_to_rvec(object_quat_cam)
-                    
-                    # Create object from previous pose
-                    # Mark as no_display if timeout exceeded (no wireframe/grasp points, but still publish pose)
-                    final_object = {
-                        "name": model_name,
-                        "points": [object_pos_world],
-                        "position": object_pos_world,
-                        "quaternion": object_quat_world,
-                        'inferred': True,  # Always inferred when using previous value (no current detections)
-                        'no_display': timeout_exceeded,  # Mark as no_display if timeout exceeded
-                        "object_tvec": object_tvec_cam,
-                        "object_rvec": object_rvec_cam
-                    }
-                    identified_jenga.append(final_object)
-                    
-                    if talk and frame_idx % 30 == 0 and not headless_mode:
-                        status = f"(timeout exceeded, no wireframe/grasp)" if timeout_exceeded else ""
-                        print(f"[{model_name}] Using previous pose (no current detections, missing for {frames_since_fresh}/{timeout} frames) {status}")
-
         objects = identified_jenga + detected_objects
 
-        # Wireframe Mask Visualization for ArUco Objects (only for best detections)
-        # Skip wireframe drawing if timeout exceeded (no_display flag) or wireframe mode is off
-        if wireframe_display_mode == 1:
-            for obj in identified_jenga:
+        # Wireframe Mask Visualization for ArUco Objects (always enabled)
+        for obj in identified_jenga:
                 model_name = obj["name"]  # Now the name is just the model name
-                
-                # Skip wireframe drawing if no_display flag is set (timeout exceeded)
-                if obj.get('no_display', False):
-                    continue  # Don't draw wireframe for objects that exceeded timeout
                 
                 if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
                     # Use the same object pose as published (world frame)
@@ -881,7 +633,6 @@ def main():
                     
                     if not is_valid_position:
                         # Skip wireframe drawing if position is invalid
-                        # This prevents displaying wireframe when ghost tracking has drifted
                         continue
                     
                     # Transform wireframe using world frame pose (same as published)
@@ -945,120 +696,11 @@ def main():
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
         
-        # Draw grasp points only when wireframe is enabled (same toggle)
-        if wireframe_display_mode == 1:
-            draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
-        
-        # Draw marker axes based on display mode (1=on)
-        # Note: Object axes are always drawn via draw_object_lines function
-        if axis_display_mode == 1:
-            for marker_id, (marker_tvec, marker_rvec) in marker_poses_for_drawing.items():
-                if marker_tvec is not None and marker_rvec is not None:
-                    try:
-                        draw_marker_axes(frame, CAMERA_MATRIX, DIST_COEFFS, marker_tvec, marker_rvec, marker_id=marker_id)
-                    except Exception as e:
-                        # Skip if drawing fails (e.g., marker out of view)
-                        pass
-        
-        # Display current axis and wireframe modes on frame
-        axis_text = f"Marker Axes: {'On' if axis_display_mode == 1 else 'Off'} (Press 'a')"
-        wireframe_text = f"Wireframe/Grasp: {'On' if wireframe_display_mode == 1 else 'Off'} (Press 'w')"
-        cv2.putText(frame, axis_text, (10, frame.shape[0] - 40), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.putText(frame, wireframe_text, (10, frame.shape[0] - 20), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # Draw grasp points (always enabled with wireframe)
+        draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
 
         # Publish the annotated frame (what shows up in OpenCV window)
         bridge_node.publish_annotated_stream(frame)
-        
-        # Record debug data if enabled
-        if args.debug_record and debug_data is not None:
-            frame_time = time.time() - debug_start_time
-            
-            # Collect marker data
-            marker_data = {}
-            for marker_id in kalman_filters:
-                if marker_id in marker_stabilities:
-                    stability = marker_stabilities[marker_id]
-                    kalman = kalman_filters[marker_id]
-                    
-                    # Get Kalman state
-                    velocity = kalman.get_velocity() if hasattr(kalman, 'get_velocity') else None
-                    acceleration = kalman.get_acceleration() if hasattr(kalman, 'get_acceleration') else None
-                    
-                    # Get predictions
-                    pred_tvec, pred_rvec = kalman.predict()
-                    pred_quat = rvec_to_quat(pred_rvec)
-                    pred_pos_world = transform_point_cam_to_world(pred_tvec, cam_pos, cam_quat)
-                    pred_quat_world = transform_orientation_cam_to_world(pred_quat, cam_quat)
-                    
-                    # Get raw measurement if available
-                    raw_tvec, raw_rvec = kalman.get_raw_measurement() if hasattr(kalman, 'get_raw_measurement') else (None, None)
-                    raw_quat = rvec_to_quat(raw_rvec) if raw_rvec is not None else None
-                    raw_pos_world = transform_point_cam_to_world(raw_tvec, cam_pos, cam_quat) if raw_tvec is not None else None
-                    raw_quat_world = transform_orientation_cam_to_world(raw_quat, cam_quat) if raw_quat is not None else None
-                    
-                    # Get Kalman corrected state (statePost)
-                    kalman_state = kalman.kf.statePost.flatten() if hasattr(kalman, 'kf') else None
-                    corrected_tvec = kalman_state[0:3] if kalman_state is not None else None
-                    corrected_quat = kalman_state[3:7] if kalman_state is not None else None
-                    corrected_pos_world = transform_point_cam_to_world(corrected_tvec, cam_pos, cam_quat) if corrected_tvec is not None else None
-                    corrected_quat_world = transform_orientation_cam_to_world(corrected_quat, cam_quat) if corrected_quat is not None else None
-                    
-                    marker_data[marker_id] = {
-                        "confirmed": bool(stability.get("confirmed", False)),
-                        "frames_missing": int(stability.get("frames_missing", 0)),
-                        "measurement_quality": float(stability.get("measurement_quality", 1.0)),
-                        "prediction_mode": stability.get("prediction_mode", None),
-                        "last_known_pos_world": stability.get("last_known_tvec_world", None).tolist() if stability.get("last_known_tvec_world") is not None else None,
-                        "last_known_quat_world": stability.get("last_known_rvec_world", None).tolist() if stability.get("last_known_rvec_world") is not None else None,
-                        "kalman_pred_pos_cam": pred_tvec.tolist(),
-                        "kalman_pred_quat_cam": pred_quat.tolist(),
-                        "kalman_pred_pos_world": pred_pos_world.tolist(),
-                        "kalman_pred_quat_world": pred_quat_world.tolist(),
-                        "kalman_corrected_pos_cam": corrected_tvec.tolist() if corrected_tvec is not None else None,
-                        "kalman_corrected_quat_cam": corrected_quat.tolist() if corrected_quat is not None else None,
-                        "kalman_corrected_pos_world": corrected_pos_world.tolist() if corrected_pos_world is not None else None,
-                        "kalman_corrected_quat_world": corrected_quat_world.tolist() if corrected_quat_world is not None else None,
-                        "raw_measurement_pos_cam": raw_tvec.tolist() if raw_tvec is not None else None,
-                        "raw_measurement_quat_cam": raw_quat.tolist() if raw_quat is not None else None,
-                        "raw_measurement_pos_world": raw_pos_world.tolist() if raw_pos_world is not None else None,
-                        "raw_measurement_quat_world": raw_quat_world.tolist() if raw_quat_world is not None else None,
-                        "velocity": velocity.tolist() if velocity is not None else None,
-                        "acceleration": acceleration.tolist() if acceleration is not None else None,
-                        "confirmed_tvec": stability.get("confirmed_tvec", None).tolist() if stability.get("confirmed_tvec") is not None else None,
-                        "confirmed_rvec": stability.get("confirmed_rvec", None).tolist() if stability.get("confirmed_rvec") is not None else None
-                    }
-            
-            # Collect object data
-            object_data = {}
-            for obj in identified_jenga:
-                model_name = obj["name"]
-                object_data[model_name] = {
-                    "position_world": obj["position"].tolist(),
-                    "quaternion_world": obj["quaternion"].tolist(),
-                    "inferred": bool(obj.get("inferred", False)),
-                    "no_display": bool(obj.get("no_display", False))
-                }
-            
-            # Record frame data
-            frame_record = {
-                "frame": int(frame_idx),
-                "timestamp": float(frame_time),
-                "robot_moving": bool(robot_moving),
-                "frames_stationary": int(frames_stationary),
-                "just_stopped_moving": bool(just_stopped_moving),
-                "ee_position": ee_pos.tolist() if ee_pos is not None else None,
-                "ee_quaternion": ee_quat.tolist() if ee_quat is not None else None,
-                "camera_position": cam_pos.tolist() if cam_pos is not None else None,
-                "camera_quaternion": cam_quat.tolist() if cam_quat is not None else None,
-                "robot_movement_distance": float(np.linalg.norm(ee_pos - prev_ee_pos)) if prev_ee_pos is not None and ee_pos is not None else 0.0,
-                "markers": marker_data,
-                "objects": object_data,
-                "num_detected_markers": int(len(corners) if corners else 0),
-                "detected_marker_ids": [int(id_val) for id_val in ids] if ids else []
-            }
-            debug_data.append(frame_record)
 
         # Only show OpenCV window if not in headless mode
         if not headless_mode:
@@ -1066,59 +708,20 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 break
-            elif key == ord('a'):
-                # Toggle marker axis display mode: 0 <-> 1
-                # (Object axes are always shown via draw_object_lines)
-                axis_display_mode = 1 - axis_display_mode  # Toggle between 0 and 1
-                if talk:
-                    print(f"Marker axes: {'On' if axis_display_mode == 1 else 'Off'} (Object axes always shown)")
-            elif key == ord('w'):
-                # Toggle wireframe and grasp points display mode: 0 <-> 1
-                wireframe_display_mode = 1 - wireframe_display_mode  # Toggle between 0 and 1
-                if talk:
-                    print(f"Wireframe/Grasp Points: {'On' if wireframe_display_mode == 1 else 'Off'}")
 
-    # Cleanup: release resources and shut down ROS2 before saving debug data
+    # Cleanup: release resources and shut down ROS2
     if cap is not None:
         cap.release()
     if not headless_mode:
         cv2.destroyAllWindows()
     
-    # Shut down ROS2 properly before saving debug data
-    # This prevents threading conflicts during JSON serialization
+    # Shut down ROS2 properly
     try:
         bridge_node.destroy_node()
         rclpy.shutdown()
     except Exception as e:
         if not headless_mode:
             print(f"Warning during ROS2 shutdown: {e}")
-    
-    # Save debug data if recording was enabled
-    # Do this after ROS2 shutdown to avoid threading conflicts
-    if args.debug_record and debug_data is not None:
-        try:
-            if not headless_mode:
-                print(f"\nSaving debug data to: {debug_file}")
-                print(f"Recorded {len(debug_data)} frames")
-            with open(debug_file, 'w') as f:
-                json.dump({
-                    "recording_info": {
-                        "start_time": datetime.fromtimestamp(debug_start_time).isoformat(),
-                        "end_time": datetime.now().isoformat(),
-                        "total_frames": len(debug_data),
-                        "duration_seconds": time.time() - debug_start_time
-                    },
-                    "frames": debug_data
-                }, f, indent=2)
-            if not headless_mode:
-                print(f"Debug data saved successfully")
-        except KeyboardInterrupt:
-            # If user interrupts during save, just exit
-            if not headless_mode:
-                print(f"\nDebug data save interrupted")
-        except Exception as e:
-            if not headless_mode:
-                print(f"Error saving debug data: {e}")
 
 if __name__ == "__main__":
     main()
