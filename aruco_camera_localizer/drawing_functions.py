@@ -1,7 +1,7 @@
 import cv2
 from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-    transform_points_world_to_img, transform_point_world_to_cam, quat_to_rpy_safe
+    transform_points_world_to_img, transform_point_world_to_cam, quat_to_rpy
 import numpy as np
 
 def canonicalize_euler(orientation):
@@ -27,7 +27,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
     put_line(f"Frame: {frame_idx}", (200, 200, 200))
 
     # End Effector
-    ee_euler = quat_to_rpy_safe(ee_quat, degrees=True, object_id='end_effector')
+    ee_euler = quat_to_rpy(ee_quat, degrees=True, object_id='end_effector')
     put_line(f"EE xyz: ({1000*ee_pos[0]:.1f}, {1000*ee_pos[1]:.1f}, {1000*ee_pos[2]:.1f}) mm")
     put_line(f"EE rpy: ({ee_euler[0]: 5.1f}, {ee_euler[1]: 5.1f}, {ee_euler[2]: 5.1f}) deg")
 
@@ -47,7 +47,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
         quat = obj["quaternion"]
 
         # Use object name as ID for per-object RPY state tracking
-        euler = quat_to_rpy_safe(quat, degrees=True, object_id=name)
+        euler = quat_to_rpy(quat, degrees=True, object_id=name)
         put_line(f"{name} xyz: ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}, {1000*pos[2]:.1f}) mm", (0, 255, 0))
         put_line(f"{name} rpy: ({euler[0]: 5.1f}, {euler[1]: 5.1f}, {euler[2]: 5.1f}) deg", (0, 255, 0))
         y += 5
@@ -162,14 +162,8 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
         # Transform object rotation to rotation matrix
         rot_matrix = R.from_quat(object_quat).as_matrix()
         
-        # Coordinate system transformation matrix (same as wireframe)
-        coord_transform = np.array([
-            [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-            [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-            [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-        ])
-        
         # Transform each grasp point from object center frame to world frame
+        # Note: object_rvec is already correct, no coordinate transformation needed
         world_grasp_points = []
         for grasp_point in grasp_points:
             # Get grasp point position relative to object center
@@ -179,11 +173,9 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
                 grasp_point['position']['z']
             ])
             
-            # Apply coordinate system transformation (same as wireframe)
-            grasp_pos_transformed = coord_transform @ grasp_pos_local
-            
-            # Transform to world frame
-            grasp_pos_world = object_pos + rot_matrix @ grasp_pos_transformed
+            # Transform to world frame using object rotation directly
+            # No coordinate transformation needed - object_rvec is already correct
+            grasp_pos_world = object_pos + rot_matrix @ grasp_pos_local
             world_grasp_points.append(grasp_pos_world)
         
         # Transform grasp points to image coordinates
@@ -199,3 +191,96 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
                 cv2.putText(frame, f"G{i+1}", 
                            (grasp_point_img[0] + 10, grasp_point_img[1] - 10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)  # White text with thicker stroke
+
+def draw_marker_axes(frame, camera_matrix, dist_coeffs, marker_tvec, marker_rvec, marker_id=None, axis_length=0.015):
+    """
+    Draw coordinate axes for an ArUco marker pose in camera frame.
+    
+    Args:
+        frame: OpenCV image frame
+        camera_matrix: Camera intrinsic matrix
+        dist_coeffs: Distortion coefficients
+        marker_tvec: Marker translation vector in camera frame (3x1)
+        marker_rvec: Marker rotation vector in camera frame (3x1)
+        marker_id: Optional marker ID to display
+        axis_length: Length of axes in meters (default 15mm)
+    """
+    # Define axis endpoints in marker frame (X, Y, Z axes)
+    # X: Red, Y: Green, Z: Blue (OpenCV convention)
+    # OpenCV ArUco convention: Z-axis points OUTWARDS from marker surface (away from camera)
+    axis_points = np.float32([
+        [0, 0, 0],              # Origin
+        [axis_length, 0, 0],   # X axis (points right)
+        [0, axis_length, 0],   # Y axis (points down)
+        [0, 0, axis_length]    # Z axis (points OUTWARDS from marker surface)
+    ]).reshape(-1, 3)
+    
+    # Project axis points to image plane
+    projected_points, _ = cv2.projectPoints(
+        axis_points,
+        marker_rvec,
+        marker_tvec,
+        camera_matrix,
+        dist_coeffs
+    )
+    
+    projected_points = projected_points.reshape(-1, 2).astype(int)
+    
+    origin = tuple(projected_points[0])
+    x_axis = tuple(projected_points[1])
+    y_axis = tuple(projected_points[2])
+    z_axis = tuple(projected_points[3])
+    
+    # Draw axes with arrows
+    # X axis: Red
+    cv2.arrowedLine(frame, origin, x_axis, (0, 0, 255), 3, tipLength=0.3)
+    # Y axis: Green
+    cv2.arrowedLine(frame, origin, y_axis, (0, 255, 0), 3, tipLength=0.3)
+    # Z axis: Blue
+    cv2.arrowedLine(frame, origin, z_axis, (255, 0, 0), 3, tipLength=0.3)
+    
+    # Draw marker ID label if provided
+    if marker_id is not None:
+        label_pos = (origin[0] + 10, origin[1] - 10)
+        cv2.putText(frame, f"M{marker_id}", label_pos, 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+def draw_object_axes(frame, camera_matrix, cam_pos, cam_quat, object_pos_world, object_quat_world, object_name=None, axis_length=0.02):
+    """
+    Draw coordinate axes for an object pose in world frame.
+    
+    Args:
+        frame: OpenCV image frame
+        camera_matrix: Camera intrinsic matrix
+        cam_pos: Camera position in world frame
+        cam_quat: Camera orientation in world frame (quaternion)
+        object_pos_world: Object position in world frame
+        object_quat_world: Object orientation in world frame (quaternion)
+        object_name: Optional object name to display
+        axis_length: Length of axes in meters (default 20mm)
+    """
+    # Define axis endpoints in object frame
+    rot = R.from_quat(object_quat_world)
+    axes_world = [
+        object_pos_world,                          # origin
+        object_pos_world + rot.apply([axis_length, 0, 0]),  # X axis
+        object_pos_world + rot.apply([0, axis_length, 0]),  # Y axis
+        object_pos_world + rot.apply([0, 0, axis_length])   # Z axis
+    ]
+    
+    # Transform to image coordinates
+    axes_image = transform_points_world_to_img(axes_world, cam_pos, cam_quat, camera_matrix)
+    
+    o, x, y, z = axes_image
+    if o and x:
+        cv2.arrowedLine(frame, o, x, (0, 0, 255), 3, tipLength=0.3)  # X: Red
+    if o and y:
+        cv2.arrowedLine(frame, o, y, (0, 255, 0), 3, tipLength=0.3)  # Y: Green
+    if o and z:
+        cv2.arrowedLine(frame, o, z, (255, 0, 0), 3, tipLength=0.3)  # Z: Blue
+    
+    # Draw object name label if provided
+    if object_name is not None and o:
+        label_pos = (o[0] + 10, o[1] + 20)
+        cv2.putText(frame, object_name, label_pos, 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)

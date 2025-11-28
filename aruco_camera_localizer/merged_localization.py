@@ -13,7 +13,7 @@ from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_o
 transform_points_world_to_img, transform_point_world_to_cam, transform_orientation_world_to_cam, slerp_quat
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points, draw_marker_axes
 import threading
 import rclpy
 import argparse
@@ -87,77 +87,136 @@ def get_available_models(data_dir):
     available_models = {f.stem.replace("_aruco", "") for f in aruco_files}
     return sorted(list(available_models))
 
-def estimate_object_pose_from_marker(marker_pose, aruco_annotation):
+def estimate_object_pose_from_marker(marker_pose, aruco_annotation, cam_pos=None, cam_quat=None):
     """
     Estimate the 6D pose of the object center from ArUco marker pose.
-    This is the same function from object_pose_estimator_kalman.py
+    Uses homogeneous transformation matrices to compute position and orientation together.
+    Returns position (tvec) and orientation (rvec) as rotation vector.
+    
+    Note: OpenCV's solvePnP returns marker pose in camera frame, but the marker's
+    coordinate frame convention may differ from the CAD model. The T_marker_to_object
+    from JSON is in the CAD marker frame, so we need to ensure proper transformation.
+    
+    Args:
+        marker_pose: Tuple of (marker_tvec, marker_rvec) in camera frame
+        aruco_annotation: Dictionary with marker annotation data from JSON
+        cam_pos: Optional camera position in world frame (for surface_normal verification)
+        cam_quat: Optional camera orientation in world frame (for surface_normal verification)
     """
     # Get marker position and rotation
     marker_tvec, marker_rvec = marker_pose
     
     # Convert marker rotation vector to rotation matrix
+    # Use the detected marker pose directly (no in-plane rotation removal)
     marker_rotation_matrix, _ = cv2.Rodrigues(marker_rvec)
+    marker_tvec = marker_tvec.flatten()
     
-    # Get the marker's pose relative to CAD center from annotation
-    marker_relative_pose = aruco_annotation['pose_relative_to_cad_center']
+    # Get the marker's transformation to object center from annotation
+    # Support both T_marker_to_object and T_object_to_marker formats
+    if 'T_object_to_marker' in aruco_annotation:
+        # New format: T_object_to_marker (from object to marker)
+        # Need to invert to get T_marker_to_object
+        obj_to_marker_data = aruco_annotation['T_object_to_marker']
+        
+        # Get position and rotation from object to marker
+        t_obj_to_marker = np.array([
+            obj_to_marker_data['position']['x'],
+            obj_to_marker_data['position']['y'], 
+            obj_to_marker_data['position']['z']
+        ])
+        
+        obj_to_marker_rot = obj_to_marker_data['rotation']
+        
+        # Prefer quaternion if available, otherwise use Euler angles
+        if 'quaternion' in obj_to_marker_rot:
+            quat = obj_to_marker_rot['quaternion']
+            quat_array = np.array([quat['x'], quat['y'], quat['z'], quat['w']])  # scipy uses x, y, z, w
+            R_obj_to_marker = R.from_quat(quat_array).as_matrix()
+        else:
+            # Fall back to Euler angles if quaternion not available
+            R_obj_to_marker = euler_to_rotation_matrix(
+                obj_to_marker_rot['roll'], obj_to_marker_rot['pitch'], obj_to_marker_rot['yaw']
+            )
+        
+        # Invert to get T_marker_to_object
+        R_marker_to_obj = R_obj_to_marker.T
+        t_marker_to_obj = -R_marker_to_obj @ t_obj_to_marker
+        
+    elif 'T_marker_to_object' in aruco_annotation:
+        # Old format: T_marker_to_object (from marker to object) - use directly
+        marker_to_obj_data = aruco_annotation['T_marker_to_object']
+        
+        # Get object center position in marker frame (CAD convention)
+        t_marker_to_obj = np.array([
+            marker_to_obj_data['position']['x'],
+            marker_to_obj_data['position']['y'], 
+            marker_to_obj_data['position']['z']
+        ])
+        
+        # Get rotation from marker frame to object frame (CAD convention)
+        marker_rot = marker_to_obj_data['rotation']
+        
+        # Prefer quaternion if available, otherwise use Euler angles
+        if 'quaternion' in marker_rot:
+            quat = marker_rot['quaternion']
+            quat_array = np.array([quat['x'], quat['y'], quat['z'], quat['w']])  # scipy uses x, y, z, w
+            R_marker_to_obj = R.from_quat(quat_array).as_matrix()
+        else:
+            # Fall back to Euler angles if quaternion not available
+            R_marker_to_obj = euler_to_rotation_matrix(
+                marker_rot['roll'], marker_rot['pitch'], marker_rot['yaw']
+            )
+    else:
+        raise ValueError(
+            f"Invalid JSON format! Marker ID {aruco_annotation.get('aruco_id', 'unknown')} missing required 'T_marker_to_object' or 'T_object_to_marker' field. "
+            f"Available keys: {list(aruco_annotation.keys())}"
+        )
     
-    # Coordinate system transformation matrix
-    coord_transform = np.array([
-        [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-        [0,   1,  0],  # Y-axis
-        [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-    ])
+    # Build homogeneous transformation matrices
+    # T_camera_to_marker: Marker pose in camera frame (4x4)
+    # Using detected marker pose directly (no in-plane rotation removal)
+    R_cm = marker_rotation_matrix  # R_camera_to_marker
+    t_cm = marker_tvec
     
-    # Get marker position relative to object center (in object frame)
-    marker_pos_in_object = np.array([
-        marker_relative_pose['position']['x'],
-        marker_relative_pose['position']['y'], 
-        marker_relative_pose['position']['z']
-    ])
+    # T_marker_to_object: Transformation from marker frame to object frame
+    # The annotator stores R_marker_to_world (from marker to world/object frame)
+    # and position of object in marker frame, so we can directly compose:
+    # T_camera_to_object = T_camera_to_marker @ T_marker_to_object
     
-    # Apply coordinate transformation
-    marker_pos_in_object = coord_transform @ marker_pos_in_object
+    # Build homogeneous transformation matrices
+    T_camera_to_marker = np.eye(4)
+    T_camera_to_marker[:3, :3] = R_cm
+    T_camera_to_marker[:3, 3] = t_cm
     
-    # Get marker orientation relative to object center
-    marker_rot = marker_relative_pose['rotation']
-    marker_rotation_in_object = euler_to_rotation_matrix(
-        marker_rot['roll'], marker_rot['pitch'], marker_rot['yaw']
-    )
+    T_marker_to_object = np.eye(4)
+    T_marker_to_object[:3, :3] = R_marker_to_obj
+    T_marker_to_object[:3, 3] = t_marker_to_obj
     
-    # Apply coordinate system transformation to the rotation matrix
-    marker_rotation_in_object = coord_transform @ marker_rotation_in_object @ coord_transform.T
+    # Compose transformations: T_camera_to_object = T_camera_to_marker @ T_marker_to_object
+    # This is the chain: camera → marker → object
+    T_camera_to_object = T_camera_to_marker @ T_marker_to_object
     
-    # Calculate object center position in camera frame
-    object_origin_in_marker_frame = marker_rotation_in_object.T @ (-marker_pos_in_object)
-    object_tvec = marker_tvec.flatten() + marker_rotation_matrix @ object_origin_in_marker_frame
+    # Extract position and orientation from combined transformation
+    object_rotation_matrix = T_camera_to_object[:3, :3]
+    object_tvec = T_camera_to_object[:3, 3]
     
-    # Calculate object center orientation in camera frame
-    object_rotation_matrix = marker_rotation_matrix @ marker_rotation_in_object.T
-    
-    # Convert back to rotation vector
+    # Convert rotation matrix to rotation vector (standard OpenCV format)
     object_rvec, _ = cv2.Rodrigues(object_rotation_matrix)
     
     return object_tvec, object_rvec
 
 def euler_to_rotation_matrix(roll, pitch, yaw):
-    """Convert Euler angles (roll, pitch, yaw) to rotation matrix"""
-    r, p, y = roll, pitch, yaw
+    """Convert Euler angles (roll, pitch, yaw) to rotation matrix.
     
-    # Create rotation matrices for each axis
-    Rx = np.array([[1, 0, 0],
-                   [0, np.cos(r), -np.sin(r)],
-                   [0, np.sin(r), np.cos(r)]])
-    
-    Ry = np.array([[np.cos(p), 0, np.sin(p)],
-                   [0, 1, 0],
-                   [-np.sin(p), 0, np.cos(p)]])
-    
-    Rz = np.array([[np.cos(y), -np.sin(y), 0],
-                   [np.sin(y), np.cos(y), 0],
-                   [0, 0, 1]])
-    
-    # Combine rotations (order: Rz * Ry * Rx)
-    return Rz @ Ry @ Rx
+    Uses xyz intrinsic order to match JSON creation convention:
+    - JSON created with: THREE.js Euler(roll, pitch, yaw, 'XYZ') which uses intrinsic xyz
+    - This is intrinsic rotation (rotations about moving axes): apply roll first, then pitch, then yaw
+    - Equivalent to scipy's 'xyz' intrinsic order
+    """
+    # Use scipy intrinsic xyz to match how JSON was created (THREE.js convention)
+    # THREE.js: apply roll about X, then pitch about rotated Y, then yaw about rotated Z
+    rotation = R.from_euler('xyz', [roll, pitch, yaw], degrees=False)
+    return rotation.as_matrix()
 
 def quat_to_rvec(quat):
     """Convert quaternion to rotation vector"""
@@ -166,163 +225,6 @@ def quat_to_rvec(quat):
     # Convert rotation matrix to rotation vector
     rvec, _ = cv2.Rodrigues(rotation_matrix)
     return rvec
-
-def estimate_pose_covariance(measurement_quality, distance, is_ghost, base_covariance=None):
-    """
-    Estimate covariance matrix for a marker pose based on measurement quality, distance, and ghost status.
-    
-    Args:
-        measurement_quality: Quality score (0.0-1.0)
-        distance: Distance from camera to marker
-        is_ghost: Whether this is a ghost (predicted) measurement
-        base_covariance: Base covariance matrix (3x3 for position, 3x3 for orientation)
-    
-    Returns:
-        position_cov: 3x3 covariance matrix for position
-        orientation_cov: 3x3 covariance matrix for orientation (as quaternion)
-    """
-    if base_covariance is None:
-        # Default base covariance
-        base_pos_cov = np.eye(3) * 0.01  # 1cm base uncertainty
-        base_rot_cov = np.eye(3) * 0.01  # ~0.01 rad base uncertainty
-    else:
-        base_pos_cov, base_rot_cov = base_covariance
-    
-    # Scale by inverse quality (lower quality = higher covariance)
-    quality_factor = 1.0 / (measurement_quality + 0.1)  # Avoid division by zero
-    
-    # Scale by distance (farther = higher uncertainty)
-    distance_factor = 1.0 + distance * 2.0  # Increase uncertainty with distance
-    
-    # Scale by ghost status (ghost = higher uncertainty)
-    ghost_factor = 2.0 if is_ghost else 1.0
-    
-    # Combine factors
-    total_factor = quality_factor * distance_factor * ghost_factor
-    
-    position_cov = base_pos_cov * total_factor
-    orientation_cov = base_rot_cov * total_factor
-    
-    return position_cov, orientation_cov
-
-def fuse_object_poses(object_poses, weights=None, measurement_qualities=None, distances=None, is_ghost_list=None):
-    """
-    Fuse multiple object poses from different markers into a single stable pose using covariance-based fusion.
-    
-    Args:
-        object_poses: List of (tvec, rvec) tuples
-        weights: Optional pre-calculated weights (if None, will use covariance-based weights)
-        measurement_qualities: List of quality scores (0.0-1.0) for each pose
-        distances: List of distances for each pose
-        is_ghost_list: List of boolean indicating if each pose is ghost
-    
-    Returns:
-        fused_tvec, fused_rvec: Fused pose
-    """
-    if not object_poses:
-        return None, None
-    
-    if len(object_poses) == 1:
-        return object_poses[0]
-    
-    # If covariance information is available, use covariance-based weighting
-    if measurement_qualities is not None and distances is not None and is_ghost_list is not None:
-        # Estimate covariance for each pose
-        position_covs = []
-        orientation_covs = []
-        
-        for quality, dist, is_ghost in zip(measurement_qualities, distances, is_ghost_list):
-            pos_cov, rot_cov = estimate_pose_covariance(quality, dist, is_ghost)
-            position_covs.append(pos_cov)
-            orientation_covs.append(rot_cov)
-        
-        # Use inverse covariance weighting: weight_i = 1 / trace(covariance_i)
-        # Lower covariance (more certain) = higher weight
-        pos_weights = [1.0 / (np.trace(cov) + 1e-6) for cov in position_covs]
-        rot_weights = [1.0 / (np.trace(cov) + 1e-6) for cov in orientation_covs]
-        
-        # Normalize weights
-        pos_weight_sum = sum(pos_weights)
-        rot_weight_sum = sum(rot_weights)
-        if pos_weight_sum > 1e-6:
-            pos_weights = [w / pos_weight_sum for w in pos_weights]
-        if rot_weight_sum > 1e-6:
-            rot_weights = [w / rot_weight_sum for w in rot_weights]
-        
-        # Fuse positions using covariance-weighted average
-        fused_tvec = np.zeros(3)
-        for (tvec, _), weight in zip(object_poses, pos_weights):
-            fused_tvec += tvec * weight
-        
-        # Fuse rotations using weighted quaternion averaging
-        quaternions = []
-        for (_, rvec) in object_poses:
-            quat = rvec_to_quat(rvec)
-            quaternions.append(quat)
-        
-        # Weighted quaternion averaging
-        fused_quat = np.zeros(4)
-        for quat, weight in zip(quaternions, rot_weights):
-            # Ensure quaternion is in the same hemisphere
-            if np.dot(fused_quat, quat) < 0:
-                quat = -quat
-            fused_quat += quat * weight
-        
-        # Normalize the fused quaternion
-        quat_norm = np.linalg.norm(fused_quat)
-        if quat_norm > 1e-8:  # Avoid division by zero
-            fused_quat = fused_quat / quat_norm
-        else:
-            # Fallback to identity quaternion if norm is too small
-            fused_quat = np.array([0, 0, 0, 1])
-        
-        # Convert back to rotation vector
-        fused_rvec = quat_to_rvec(fused_quat)
-        
-        return fused_tvec, fused_rvec
-    
-    # Fallback to simple weighted average if no covariance info
-    if weights is None:
-        weights = [1.0] * len(object_poses)
-    
-    # Normalize weights
-    total_weight = sum(weights)
-    if total_weight > 1e-6:
-        weights = [w / total_weight for w in weights]
-    else:
-        weights = [1.0 / len(object_poses)] * len(object_poses)
-    
-    # Fuse positions (weighted average)
-    fused_tvec = np.zeros(3)
-    for (tvec, _), weight in zip(object_poses, weights):
-        fused_tvec += tvec * weight
-    
-    # Fuse rotations using quaternion averaging
-    quaternions = []
-    for (_, rvec) in object_poses:
-        quat = rvec_to_quat(rvec)
-        quaternions.append(quat)
-    
-    # Weighted quaternion averaging
-    fused_quat = np.zeros(4)
-    for quat, weight in zip(quaternions, weights):
-        # Ensure quaternion is in the same hemisphere
-        if np.dot(fused_quat, quat) < 0:
-            quat = -quat
-        fused_quat += quat * weight
-    
-    # Normalize the fused quaternion
-    quat_norm = np.linalg.norm(fused_quat)
-    if quat_norm > 1e-8:  # Avoid division by zero
-        fused_quat = fused_quat / quat_norm
-    else:
-        # Fallback to identity quaternion if norm is too small
-        fused_quat = np.array([0, 0, 0, 1])
-    
-    # Convert back to rotation vector
-    fused_rvec = quat_to_rvec(fused_quat)
-    
-    return fused_tvec, fused_rvec
 
 def load_wireframe_data(json_file):
     """Load wireframe data from JSON file"""
@@ -336,32 +238,6 @@ def load_grasp_points_data(json_file):
         data = json.load(f)
     return data['grasp_points']
 
-
-def transform_mesh_to_camera_frame(vertices, object_pose):
-    """Transform mesh vertices from object center frame to camera frame"""
-    object_tvec, object_rvec = object_pose
-    
-    # Convert rotation vector to rotation matrix
-    rotation_matrix, _ = cv2.Rodrigues(object_rvec)
-    
-    # Coordinate system transformation matrix
-    coord_transform = np.array([
-        [-1,  0,  0],  # X-axis: flip (3D graphics X-right → OpenCV X-left)
-        [0,   1,  0],  # Y-axis: unchanged (both systems use Y-up)
-        [0,   0, -1]   # Z-axis: flip (3D graphics Z-forward → OpenCV Z-backward)
-    ])
-    
-    # Transform vertices from object center frame to camera frame
-    transformed_vertices = []
-    for vertex in vertices:
-        # Apply coordinate system transformation
-        vertex_transformed = coord_transform @ np.array(vertex)
-        
-        # Transform from object frame to camera frame
-        vertex_cam = rotation_matrix @ vertex_transformed + object_tvec
-        transformed_vertices.append(vertex_cam)
-    
-    return np.array(transformed_vertices)
 
 def calculate_scale_factor_from_aruco(corners, marker_size):
     """Calculate scale factor from ArUco marker pixel size"""
@@ -609,6 +485,12 @@ def main():
     last_seen_frames = {}
     frame_idx = 0
     
+    # Marker axis display mode: 0=off, 1=on (object axes always shown via draw_object_lines)
+    axis_display_mode = 1  # Default: show marker axes
+    
+    # Wireframe display mode: 0=off, 1=on
+    wireframe_display_mode = 1  # Default: show wireframe
+    
     # Temporal smoothing for fused object poses
     object_pose_history = {}  # {model_name: {'tvec': prev_tvec, 'rvec': prev_rvec, 'tvec_world': prev_tvec_world, 'rvec_world': prev_rvec_world, 'last_fresh_frame': frame_idx}}
     # Track when objects were last seen with fresh detections (not all ghost)
@@ -671,6 +553,8 @@ def main():
     parameters = aruco.DetectorParameters()
     if not headless_mode:
         print("Press 'q' to quit.")
+        print("Press 'a' to toggle marker axes (Object axes always shown via draw_object_lines)")
+        print("Press 'w' to toggle wireframe and grasp points display")
 
     detected_objects = []
     # Robot movement tracking for minimum z selection
@@ -739,13 +623,20 @@ def main():
         # Calculate scale factor from ArUco marker detection
         scale_factor = calculate_scale_factor_from_aruco(corners, TOTAL_MARKER_SIZE)
 
-        # After estimating pose, collect ALL confirmed markers and fuse them by object
-        # Include both detected markers and markers in ghost tracking mode
-        object_detections = {}  # {model_name: [(object_tvec, object_rvec, distance, marker_id, is_ghost)]}
+        # Process confirmed markers and convert to object poses (one marker per object)
+        # Use the first marker found for each object type
+        object_detections = {}  # {model_name: (object_tvec, object_rvec, distance, marker_id, is_ghost)}
+        marker_poses_for_drawing = {}  # {marker_id: (tvec, rvec)} for axis visualization
         
-        # Collect all confirmed markers (including those in ghost tracking) and convert to object poses
+        # Process all confirmed markers (including those in ghost tracking) and convert to object poses
         for marker_id in kalman_filters:
             if marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
+                model_name = marker_annotations[marker_id]['model_name']
+                
+                # Skip if we already have a detection for this object
+                if model_name in object_detections:
+                    continue
+                
                 stability = marker_stabilities[marker_id]
                 frames_missing = stability.get("frames_missing", 0)
                 is_ghost = frames_missing > 0  # True if marker is in ghost tracking mode
@@ -773,81 +664,39 @@ def main():
                 
                 # Get object pose from marker pose
                 marker_annotation = marker_annotations[marker_id]['annotation']
-                object_tvec, object_rvec = estimate_object_pose_from_marker((tvec, rvec), marker_annotation)
+                try:
+                    object_tvec, object_rvec = estimate_object_pose_from_marker(
+                        (tvec, rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
+                    )
+                except ValueError as e:
+                    # Skip markers with old/invalid JSON format
+                    if talk and frame_idx % 30 == 0:
+                        print(f"[{model_name}] Skipping marker {marker_id}: {str(e)[:80]}...")
+                    continue
                 
-                model_name = marker_annotations[marker_id]['model_name']
                 distance = np.linalg.norm(object_tvec)
                 
-                # Get measurement quality from marker stability
-                measurement_quality = marker_stabilities[marker_id].get("measurement_quality", 1.0)
+                # Store detection for this object
+                object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id, is_ghost)
                 
-                # Group by object type
-                if model_name not in object_detections:
-                    object_detections[model_name] = []
-                object_detections[model_name].append((object_tvec, object_rvec, distance, marker_id, is_ghost, measurement_quality))
+                # Store marker pose for axis visualization
+                marker_poses_for_drawing[marker_id] = (tvec, rvec)
         
-        # Fuse poses for each object using weighted averaging
-        for model_name, detections in object_detections.items():
-            if not detections:
-                continue
+        # Process each object detection
+        for model_name, (object_tvec, object_rvec, distance, marker_id, is_ghost) in object_detections.items():
+            # Check if pose is valid
+            if (object_tvec is not None and object_rvec is not None and 
+                not np.any(np.isnan(object_tvec)) and not np.any(np.isnan(object_rvec))):
                 
-            # Extract poses and calculate weights (closer markers get higher weight, ghost markers get lower weight)
-            object_poses = [(tvec, rvec) for tvec, rvec, _, _, _, _ in detections]
-            distances = [dist for _, _, dist, _, _, _ in detections]
-            marker_ids = [mid for _, _, _, mid, _, _ in detections]
-            is_ghost_list = [is_ghost for _, _, _, _, is_ghost, _ in detections]
-            measurement_qualities = [quality for _, _, _, _, _, quality in detections]
-            
-            # Calculate weights (inverse distance - closer markers get higher weight)
-            # Ghost markers get reduced weight (trust them less)
-            # Measurement quality also affects weight (higher quality = higher weight)
-            base_weights = [1.0 / (dist + 0.1) for dist in distances]  # Add small epsilon to avoid division by zero
-            weights = []
-            for i, (base_weight, is_ghost, quality) in enumerate(zip(base_weights, is_ghost_list, measurement_qualities)):
-                # Start with base weight
-                weight = base_weight
-                
-                # Apply ghost weight factor
-                if is_ghost:
-                    # Reduce weight for ghost markers (trust them less)
-                    # When stationary, trust more; when moving, trust less
-                    ghost_weight_factor = 0.5 if robot_moving else 0.8
-                    weight *= ghost_weight_factor
-                
-                # Apply measurement quality factor (higher quality = higher weight)
-                # Quality is 0.0-1.0, so we scale it appropriately
-                quality_factor = 0.5 + 0.5 * quality  # Scale to 0.5-1.0 range (never completely ignore)
-                weight *= quality_factor
-                
-                weights.append(weight)
-            
-            # Fuse poses using covariance-based fusion
-            fused_tvec, fused_rvec = fuse_object_poses(
-                object_poses, 
-                weights=weights,  # Pass pre-calculated weights as fallback
-                measurement_qualities=measurement_qualities,
-                distances=distances,
-                is_ghost_list=is_ghost_list
-            )
-            
-            # Check if fused pose is valid
-            if (fused_tvec is not None and fused_rvec is not None and 
-                not np.any(np.isnan(fused_tvec)) and not np.any(np.isnan(fused_rvec))):
-                
-                # Adjust smoothing based on whether we have fresh detections or ghost data
-                # When we have fresh detections: use high alpha for real-time feedback
+                # Adjust smoothing based on whether we have fresh detection or ghost data
+                # When we have fresh detection: use high alpha for real-time feedback
                 # When we have ghost data: use lower alpha to prevent flickering
                 # Special handling: when arm just stopped moving, prefer fresh detections (motion blur)
-                has_ghost = any(is_ghost_list)
-                all_ghost = all(is_ghost_list)  # All markers are ghost
                 
-                # Calculate average measurement quality for this object
-                avg_quality = np.mean(measurement_qualities) if measurement_qualities else 1.0
-                
-                # Check timeout if all detections are ghost
+                # Check timeout if detection is ghost
                 # After timeout, mark as no_display (no wireframe) but continue tracking/publishing
                 timeout_exceeded = False
-                if all_ghost and model_name in object_last_fresh_frame:
+                if is_ghost and model_name in object_last_fresh_frame:
                     last_fresh = object_last_fresh_frame[model_name]
                     frames_since_fresh = frame_idx - last_fresh
                     
@@ -857,13 +706,13 @@ def main():
                     else:
                         timeout = ghost_tracking_timeout_stationary
                     
-                    # If object has been all ghost for too long, mark as no_display
+                    # If object has been ghost for too long, mark as no_display
                     if frames_since_fresh > timeout:
                         timeout_exceeded = True
                         if talk and frame_idx % 30 == 0 and not headless_mode:
-                            print(f"[{model_name}] Timeout: all markers ghost for {frames_since_fresh} frames (timeout={timeout}) - stopping wireframe display, continuing pose tracking")
+                            print(f"[{model_name}] Timeout: marker ghost for {frames_since_fresh} frames (timeout={timeout}) - stopping wireframe display, continuing pose tracking")
                 
-                if has_ghost:
+                if is_ghost:
                     # Using ghost data - be more conservative to prevent flickering
                     if just_stopped_moving:
                         # Arm just stopped - prefer fresh detections even if using ghost (motion blur period)
@@ -877,34 +726,32 @@ def main():
                         # When moving and using ghost, still conservative but less so
                         smoothing_alpha = smoothing_alpha_ghost
                 else:
-                    # All detections are fresh
+                    # Fresh detection
                     if just_stopped_moving:
                         # Arm just stopped - prefer fresh detections strongly (motion blur period)
                         # Use very high alpha to quickly get accurate pose after movement stops
                         smoothing_alpha = 0.9  # 90% new, 10% old - very responsive
                     else:
                         # Normal fresh detection - use high alpha for real-time feedback
-                        # Adjust based on measurement quality: higher quality = more trust in new measurement
-                        smoothing_alpha = smoothing_alpha_fresh * (0.7 + 0.3 * avg_quality)  # Scale between 70%-100% of base alpha
+                        smoothing_alpha = smoothing_alpha_fresh
                 
-                # Apply temporal smoothing to fused pose
+                # Apply temporal smoothing to pose
                 if model_name in object_pose_history:
                     prev_tvec = object_pose_history[model_name]['tvec']
                     prev_rvec = object_pose_history[model_name]['rvec']
                     
                     # Smooth position (linear interpolation)
-                    smoothed_tvec = smoothing_alpha * fused_tvec + (1 - smoothing_alpha) * prev_tvec
+                    smoothed_tvec = smoothing_alpha * object_tvec + (1 - smoothing_alpha) * prev_tvec
                     
                     # Smooth rotation (quaternion slerp)
-                    fused_quat = rvec_to_quat(fused_rvec)
+                    object_quat = rvec_to_quat(object_rvec)
                     prev_quat = rvec_to_quat(prev_rvec)
-                    smoothed_quat = slerp_quat(prev_quat, fused_quat, smoothing_alpha)
+                    smoothed_quat = slerp_quat(prev_quat, object_quat, smoothing_alpha)
                     smoothed_rvec = quat_to_rvec(smoothed_quat)
                 else:
-                    # First detection - use fused pose directly (no smoothing)
-                    smoothed_tvec, smoothed_rvec = fused_tvec, fused_rvec
-                
-                smoothed_quat = rvec_to_quat(smoothed_rvec)
+                    # First detection - use pose directly (no smoothing)
+                    smoothed_tvec, smoothed_rvec = object_tvec, object_rvec
+                    smoothed_quat = rvec_to_quat(smoothed_rvec)
                 
                 # Convert to world frame
                 object_pos_world = transform_point_cam_to_world(smoothed_tvec, cam_pos, cam_quat)
@@ -919,8 +766,8 @@ def main():
                     'last_fresh_frame': frame_idx
                 }
                 
-                # Update last fresh frame if we have fresh detections (not all ghost)
-                if not has_ghost:
+                # Update last fresh frame if we have fresh detection (not ghost)
+                if not is_ghost:
                     object_last_fresh_frame[model_name] = frame_idx
                 elif model_name not in object_last_fresh_frame:
                     # First time seeing this object, even if ghost, record it
@@ -933,7 +780,7 @@ def main():
                     "points": [object_pos_world],
                     "position": object_pos_world,
                     "quaternion": object_quat_world,
-                    'inferred': any(is_ghost_list),  # Mark as inferred if any markers are ghost
+                    'inferred': is_ghost,  # Mark as inferred if marker is ghost
                     'no_display': timeout_exceeded,  # Mark as no_display if timeout exceeded (no wireframe/grasp)
                     "object_tvec": smoothed_tvec,
                     "object_rvec": smoothed_rvec
@@ -941,14 +788,11 @@ def main():
                 identified_jenga.append(final_object)
                 
                 if talk and frame_idx % 30 == 0:  # Only print every 30 frames
-                    avg_distance = np.mean(distances)
-                    ghost_count = sum(is_ghost_list)
                     if not headless_mode:
-                        status = f"({ghost_count} ghost)" if ghost_count > 0 else ""
-                        print(f"[{model_name}] Fused from {len(detections)} markers {status} - Avg distance: {avg_distance:.3f}m")
+                        status = "(ghost)" if is_ghost else ""
+                        print(f"[{model_name}] From marker {marker_id} {status} - Distance: {distance:.3f}m")
                         print(f"  Pos: {object_pos_world}")
                         print(f"  Quat: {object_quat_world}")
-                        print(f"  Markers: {marker_ids}")
         
         # Handle objects that were previously detected but are now missing
         # Use previous known poses when detections are completely missing
@@ -1001,81 +845,97 @@ def main():
         objects = identified_jenga + detected_objects
 
         # Wireframe Mask Visualization for ArUco Objects (only for best detections)
-        # Skip wireframe drawing if timeout exceeded (no_display flag)
-        for obj in identified_jenga:
-            model_name = obj["name"]  # Now the name is just the model name
-            
-            # Skip wireframe drawing if no_display flag is set (timeout exceeded)
-            if obj.get('no_display', False):
-                continue  # Don't draw wireframe for objects that exceeded timeout
-            
-            if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
-                # Get object pose in camera frame
-                object_pos_world = obj["position"]
-                object_quat_world = obj["quaternion"]
+        # Skip wireframe drawing if timeout exceeded (no_display flag) or wireframe mode is off
+        if wireframe_display_mode == 1:
+            for obj in identified_jenga:
+                model_name = obj["name"]  # Now the name is just the model name
                 
-                # Transform to camera frame
-                object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
+                # Skip wireframe drawing if no_display flag is set (timeout exceeded)
+                if obj.get('no_display', False):
+                    continue  # Don't draw wireframe for objects that exceeded timeout
                 
-                # Validate wireframe position before drawing
-                # Check if object is in front of camera and within reasonable distance
-                is_valid_position = True
-                
-                # Check depth (z should be positive and reasonable)
-                if object_pos_cam[2] <= 0.01:  # Behind camera or too close
-                    is_valid_position = False
-                elif object_pos_cam[2] > 2.0:  # Too far away (unlikely to be visible)
-                    is_valid_position = False
-                elif object_pos_cam[2] < 0.05:  # Very close (might be invalid)
-                    is_valid_position = False
-                
-                # Check if object is within reasonable bounds (not too far from camera center)
-                distance_from_camera = np.linalg.norm(object_pos_cam)
-                if distance_from_camera > 2.5:  # Too far
-                    is_valid_position = False
-                
-                if not is_valid_position:
-                    # Skip wireframe drawing if position is invalid
-                    # This prevents displaying wireframe when ghost tracking has drifted
-                    continue
-                
-                # For quaternion, we need to transform from world to camera frame
-                cam_rotation_matrix = R.from_quat(cam_quat).as_matrix()
-                object_rotation_matrix = R.from_quat(object_quat_world).as_matrix()
-                object_rotation_cam = cam_rotation_matrix.T @ object_rotation_matrix
-                object_quat_cam = R.from_matrix(object_rotation_cam).as_quat()
-                
-                # Convert quaternion to rotation vector
-                object_rotation_matrix = R.from_quat(object_quat_cam).as_matrix()
-                object_rvec, _ = cv2.Rodrigues(object_rotation_matrix)
-                
-                # Transform wireframe to camera frame
-                wireframe_vertices = model_data[model_name]['wireframe_vertices']
-                wireframe_edges = model_data[model_name]['wireframe_edges']
-                
-                transformed_vertices = transform_mesh_to_camera_frame(wireframe_vertices, (object_pos_cam, object_rvec))
-                projected_vertices = project_vertices_to_image(transformed_vertices, CAMERA_MATRIX, DIST_COEFFS, scale_factor)
-                
-                # Additional validation: check if at least some vertices are within image bounds
-                if len(projected_vertices) > 0:
-                    vertices_in_bounds = 0
-                    for v in projected_vertices:
-                        if 0 <= v[0] < frame.shape[1] and 0 <= v[1] < frame.shape[0]:
-                            vertices_in_bounds += 1
+                if model_name in model_data and model_data[model_name]['wireframe_vertices'] is not None:
+                    # Use the same object pose as published (world frame)
+                    object_pos_world = obj["position"]
+                    object_quat_world = obj["quaternion"]
                     
-                    # If less than 10% of vertices are in bounds, object is likely out of view
-                    if vertices_in_bounds < len(projected_vertices) * 0.1:
-                        continue  # Skip drawing if object is mostly out of view
-                
-                # Draw wireframe lines directly on the frame (no mask needed)
-                for edge in wireframe_edges:
-                    if len(edge) >= 2:
-                        start_idx, end_idx = edge[0], edge[1]
-                        if start_idx < len(projected_vertices) and end_idx < len(projected_vertices):
-                            start_point = tuple(projected_vertices[start_idx])
-                            end_point = tuple(projected_vertices[end_idx])
-                            # Draw green wireframe lines directly
-                            cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
+                    # Convert world frame pose to camera frame for validation
+                    object_pos_cam = transform_point_world_to_cam(object_pos_world, cam_pos, cam_quat)
+                    
+                    # Validate wireframe position before drawing
+                    # Check if object is in front of camera and within reasonable distance
+                    is_valid_position = True
+                    
+                    # Check depth (z should be positive and reasonable)
+                    if object_pos_cam[2] <= 0.01:  # Behind camera or too close
+                        is_valid_position = False
+                    elif object_pos_cam[2] > 2.0:  # Too far away (unlikely to be visible)
+                        is_valid_position = False
+                    elif object_pos_cam[2] < 0.05:  # Very close (might be invalid)
+                        is_valid_position = False
+                    
+                    # Check if object is within reasonable bounds (not too far from camera center)
+                    distance_from_camera = np.linalg.norm(object_pos_cam)
+                    if distance_from_camera > 2.5:  # Too far
+                        is_valid_position = False
+                    
+                    if not is_valid_position:
+                        # Skip wireframe drawing if position is invalid
+                        # This prevents displaying wireframe when ghost tracking has drifted
+                        continue
+                    
+                    # Transform wireframe using world frame pose (same as published)
+                    wireframe_vertices = model_data[model_name]['wireframe_vertices']
+                    wireframe_edges = model_data[model_name]['wireframe_edges']
+                    
+                    # Transform vertices from object frame to world frame, then to image
+                    # This uses the same pose as published
+                    rot_matrix = R.from_quat(object_quat_world).as_matrix()
+                    world_vertices = []
+                    for vertex in wireframe_vertices:
+                        # Transform from object frame to world frame
+                        vertex_world = rot_matrix @ np.array(vertex) + object_pos_world
+                        world_vertices.append(vertex_world)
+                    
+                    # Transform world vertices to image coordinates (same function used for grasp points)
+                    projected_vertices = transform_points_world_to_img(world_vertices, cam_pos, cam_quat, CAMERA_MATRIX)
+                    
+                    # Filter out None values (points behind camera) and convert to numpy array format
+                    valid_projected = []
+                    for v in projected_vertices:
+                        if v is not None:
+                            valid_projected.append(v)
+                    
+                    # Additional validation: check if at least some vertices are within image bounds
+                    if len(valid_projected) > 0:
+                        vertices_in_bounds = 0
+                        for v in valid_projected:
+                            if 0 <= v[0] < frame.shape[1] and 0 <= v[1] < frame.shape[0]:
+                                vertices_in_bounds += 1
+                        
+                        # If less than 10% of vertices are in bounds, object is likely out of view
+                        if vertices_in_bounds < len(valid_projected) * 0.1:
+                            continue  # Skip drawing if object is mostly out of view
+                    
+                    # Draw wireframe lines directly on the frame (no mask needed)
+                    # Map original vertex indices to valid projected indices
+                    vertex_map = {}
+                    valid_idx = 0
+                    for orig_idx, v in enumerate(projected_vertices):
+                        if v is not None:
+                            vertex_map[orig_idx] = valid_idx
+                            valid_idx += 1
+                    
+                    for edge in wireframe_edges:
+                        if len(edge) >= 2:
+                            start_idx, end_idx = edge[0], edge[1]
+                            # Only draw if both vertices are valid (not None)
+                            if (start_idx in vertex_map and end_idx in vertex_map and
+                                start_idx < len(projected_vertices) and end_idx < len(projected_vertices)):
+                                start_point = tuple(valid_projected[vertex_map[start_idx]])
+                                end_point = tuple(valid_projected[vertex_map[end_idx]])
+                                # Draw green wireframe lines directly
+                                cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
 
         # Blue blob detection removed - only using ArUco markers now
         identified_objects = []
@@ -1084,7 +944,29 @@ def main():
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
-        draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
+        
+        # Draw grasp points only when wireframe is enabled (same toggle)
+        if wireframe_display_mode == 1:
+            draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, model_data)
+        
+        # Draw marker axes based on display mode (1=on)
+        # Note: Object axes are always drawn via draw_object_lines function
+        if axis_display_mode == 1:
+            for marker_id, (marker_tvec, marker_rvec) in marker_poses_for_drawing.items():
+                if marker_tvec is not None and marker_rvec is not None:
+                    try:
+                        draw_marker_axes(frame, CAMERA_MATRIX, DIST_COEFFS, marker_tvec, marker_rvec, marker_id=marker_id)
+                    except Exception as e:
+                        # Skip if drawing fails (e.g., marker out of view)
+                        pass
+        
+        # Display current axis and wireframe modes on frame
+        axis_text = f"Marker Axes: {'On' if axis_display_mode == 1 else 'Off'} (Press 'a')"
+        wireframe_text = f"Wireframe/Grasp: {'On' if wireframe_display_mode == 1 else 'Off'} (Press 'w')"
+        cv2.putText(frame, axis_text, (10, frame.shape[0] - 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(frame, wireframe_text, (10, frame.shape[0] - 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         # Publish the annotated frame (what shows up in OpenCV window)
         bridge_node.publish_annotated_stream(frame)
@@ -1181,8 +1063,20 @@ def main():
         # Only show OpenCV window if not in headless mode
         if not headless_mode:
             cv2.imshow("Merged Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
                 break
+            elif key == ord('a'):
+                # Toggle marker axis display mode: 0 <-> 1
+                # (Object axes are always shown via draw_object_lines)
+                axis_display_mode = 1 - axis_display_mode  # Toggle between 0 and 1
+                if talk:
+                    print(f"Marker axes: {'On' if axis_display_mode == 1 else 'Off'} (Object axes always shown)")
+            elif key == ord('w'):
+                # Toggle wireframe and grasp points display mode: 0 <-> 1
+                wireframe_display_mode = 1 - wireframe_display_mode  # Toggle between 0 and 1
+                if talk:
+                    print(f"Wireframe/Grasp Points: {'On' if wireframe_display_mode == 1 else 'Off'}")
 
     # Cleanup: release resources and shut down ROS2 before saving debug data
     if cap is not None:

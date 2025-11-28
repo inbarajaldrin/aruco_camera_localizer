@@ -8,7 +8,7 @@ from cv_bridge import CvBridge
 from max_camera_msgs.msg import PusherInfo
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from aruco_camera_localizer.geometric_functions import quat_to_rpy_safe
+from aruco_camera_localizer.geometric_functions import quat_to_rpy
 import threading
 
 class LocalizerBridge(Node):
