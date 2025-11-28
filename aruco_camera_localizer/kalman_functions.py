@@ -150,6 +150,16 @@ class QuaternionKalman:
         """Get current acceleration estimate"""
         return self.kf.statePost[10:13].flatten()
     
+    def get_state(self):
+        """Get current smoothed state (after correction, without prediction)"""
+        # Return the current statePost (smoothed state after last correction)
+        state_tvec = self.kf.statePost[0:3].flatten()
+        state_quat = self.kf.statePost[3:7].flatten()
+        # Normalize quaternion to prevent drift
+        state_quat /= np.linalg.norm(state_quat)
+        state_rvec = quat_to_rvec(state_quat).flatten()
+        return state_tvec, state_rvec
+    
     def get_raw_measurement(self):
         """Get the last raw measurement without Kalman prediction"""
         # Return the last measurement that was used for correction

@@ -9,7 +9,7 @@ from scipy.spatial.transform import Rotation as R
 from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-transform_points_world_to_img, transform_point_world_to_cam, transform_orientation_world_to_cam
+transform_points_world_to_img, transform_point_world_to_cam, transform_orientation_world_to_cam, slerp_quat
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
@@ -428,6 +428,11 @@ def main():
     last_seen_frames = {}
     frame_idx = 0
     
+    # Track which marker is currently active for each object (to prevent switching)
+    active_markers = {}  # {model_name: marker_id}
+    last_object_poses = {}  # {model_name: (object_tvec, object_rvec, frame_idx)} - for pose consistency checking
+    previous_object_quaternions = {}  # {model_name: quaternion} - for SLERP smoothing
+    
     
 
     # Determine input source
@@ -535,27 +540,27 @@ def main():
         scale_factor = calculate_scale_factor_from_aruco(corners, TOTAL_MARKER_SIZE)
 
         # Process confirmed markers and convert to object poses (one marker per object)
-        # Use the first marker found for each object type
+        # Use marker persistence: stick with current marker unless it's lost or pose differs too much
         object_detections = {}  # {model_name: (object_tvec, object_rvec, distance, marker_id)}
         
         # Only process markers that are actually detected in the current frame (no ghost tracking)
         detected_marker_ids = set(int(id_val) for id_val in ids) if ids is not None else set()
         
+        # First, collect all candidate markers for each object
+        candidate_markers = {}  # {model_name: [(marker_id, object_tvec, object_rvec, quality, distance), ...]}
+        
         for marker_id in detected_marker_ids:
             if marker_id in kalman_filters and marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
                 model_name = marker_annotations[marker_id]['model_name']
                 
-                # Skip if we already have a detection for this object
-                if model_name in object_detections:
-                    continue
-                
                 stability = marker_stabilities[marker_id]
+                kalman = kalman_filters[marker_id]
                 
-                # Use current frame's detection directly (from stability, updated in current frame)
+                # Use Kalman filter's smoothed state instead of raw measurements
                 # Only use if it was updated in the current frame
                 if stability.get("last_frame") == frame_idx and stability.get("confirmed_tvec") is not None:
-                    tvec = stability["confirmed_tvec"]
-                    rvec = stability["confirmed_rvec"]
+                    # Get smoothed pose from Kalman filter (after correction)
+                    tvec, rvec = kalman.get_state()
                 else:
                     # Skip if not detected in current frame
                     continue
@@ -571,9 +576,98 @@ def main():
                     continue
                 
                 distance = np.linalg.norm(object_tvec)
+                quality = stability.get("measurement_quality", 0.5)
                 
-                # Store detection for this object
+                # Quality threshold: reject low-quality detections
+                MIN_QUALITY_THRESHOLD = 0.3  # Reject if quality < 0.3 (~3.5 pixel RMS error)
+                if quality < MIN_QUALITY_THRESHOLD:
+                    # Skip low-quality marker detection
+                    continue
+                
+                # Store candidate marker
+                if model_name not in candidate_markers:
+                    candidate_markers[model_name] = []
+                candidate_markers[model_name].append((marker_id, object_tvec, object_rvec, quality, distance))
+        
+        # Now select the best marker for each object (with persistence)
+        for model_name, candidates in candidate_markers.items():
+            if not candidates:
+                continue
+            
+            # Check if we have an active marker for this object
+            current_marker_id = active_markers.get(model_name)
+            
+            if current_marker_id is not None:
+                # Check if current marker is still in candidates
+                current_candidate = None
+                for marker_id, object_tvec, object_rvec, quality, distance in candidates:
+                    if marker_id == current_marker_id:
+                        current_candidate = (marker_id, object_tvec, object_rvec, quality, distance)
+                        break
+                
+                if current_candidate is not None:
+                    # Current marker is still detected - check pose consistency
+                    marker_id, object_tvec, object_rvec, quality, distance = current_candidate
+                    
+                    # Check if pose differs too much from last known pose
+                    should_switch = False
+                    if model_name in last_object_poses:
+                        prev_tvec, prev_rvec, prev_frame = last_object_poses[model_name]
+                        
+                        # Calculate pose difference
+                        position_diff = np.linalg.norm(object_tvec - prev_tvec)
+                        
+                        # Calculate rotation difference (quaternion angular distance)
+                        object_quat = rvec_to_quat(object_rvec)
+                        prev_quat = rvec_to_quat(prev_rvec)
+                        quat_dot = np.abs(np.dot(object_quat, prev_quat))
+                        quat_dot = np.clip(quat_dot, -1.0, 1.0)
+                        rotation_diff = 2 * np.arccos(quat_dot)
+                        
+                        # Adaptive thresholds based on robot movement
+                        MAX_POSITION_DIFF = 0.15 if robot_moving else 0.08  # 15cm moving, 8cm stationary
+                        MAX_ROTATION_DIFF = 0.5 if robot_moving else 0.3   # ~29deg moving, ~17deg stationary
+                        
+                        # If pose differs too much, current marker might be lost/occluded - switch
+                        if position_diff > MAX_POSITION_DIFF or rotation_diff > MAX_ROTATION_DIFF:
+                            should_switch = True
+                    
+                    if not should_switch:
+                        # Keep using current marker
+                        object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id)
+                        last_object_poses[model_name] = (object_tvec.copy(), object_rvec.copy(), frame_idx)
+                        continue
+                    # else: pose differs too much, fall through to select new marker
+                # else: current marker not detected, fall through to select new marker
+            
+            # Need to select a new marker (either no active marker, or current one lost/inconsistent)
+            # Select best candidate (highest quality, or closest if quality similar)
+            if len(candidates) == 1:
+                # Only one candidate
+                marker_id, object_tvec, object_rvec, quality, distance = candidates[0]
                 object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id)
+                active_markers[model_name] = marker_id
+                last_object_poses[model_name] = (object_tvec.copy(), object_rvec.copy(), frame_idx)
+            else:
+                # Multiple candidates - prefer higher quality, then closer distance
+                candidates.sort(key=lambda x: (-x[3], x[4]))  # Sort by quality (desc), then distance (asc)
+                marker_id, object_tvec, object_rvec, quality, distance = candidates[0]
+                object_detections[model_name] = (object_tvec, object_rvec, distance, marker_id)
+                active_markers[model_name] = marker_id
+                last_object_poses[model_name] = (object_tvec.copy(), object_rvec.copy(), frame_idx)
+        
+        # Clean up active markers for objects not seen this frame
+        objects_seen_this_frame = set(candidate_markers.keys())
+        for model_name in list(active_markers.keys()):
+            if model_name not in objects_seen_this_frame:
+                # Object not detected - clear active marker after some time
+                if model_name in last_object_poses:
+                    prev_tvec, prev_rvec, prev_frame = last_object_poses[model_name]
+                    if frame_idx - prev_frame > 60:  # ~2 seconds at 30fps
+                        del active_markers[model_name]
+                        del last_object_poses[model_name]
+                        if model_name in previous_object_quaternions:
+                            del previous_object_quaternions[model_name]
         
         # Process each object detection
         for model_name, (object_tvec, object_rvec, distance, marker_id) in object_detections.items():
@@ -581,11 +675,21 @@ def main():
             if (object_tvec is not None and object_rvec is not None and 
                 not np.any(np.isnan(object_tvec)) and not np.any(np.isnan(object_rvec))):
                 
-                # Use raw pose directly (no temporal smoothing, no Kalman filtering)
+                # Use Kalman-filtered pose (temporally smoothed)
                 # Convert to world frame
                 object_quat = rvec_to_quat(object_rvec)
                 object_pos_world = transform_point_cam_to_world(object_tvec, cam_pos, cam_quat)
                 object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
+                
+                # Apply SLERP for smooth quaternion interpolation (reduces jitter)
+                SLERP_BLEND_FACTOR = 0.8  # 0.0 = use previous, 1.0 = use current (0.8 = 80% current, 20% previous)
+                if model_name in previous_object_quaternions:
+                    prev_quat_world = previous_object_quaternions[model_name]
+                    # SLERP between previous and current quaternion for smooth transition
+                    object_quat_world = slerp_quat(prev_quat_world, object_quat_world, blend=SLERP_BLEND_FACTOR)
+                
+                # Update previous quaternion for next frame
+                previous_object_quaternions[model_name] = object_quat_world.copy()
                 
                 # Create final object
                 final_object = {
