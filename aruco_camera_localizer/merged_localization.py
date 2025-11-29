@@ -637,8 +637,8 @@ def main():
                 stability = marker_stabilities[marker_id]
                 
                 # Use Kalman filter's smoothed state if enabled, otherwise use confirmed pose
-                # Only use if it was updated in the current frame
-                if stability.get("last_frame") == frame_idx and stability.get("confirmed_tvec") is not None:
+                # Use confirmed pose if available (don't require last_frame == frame_idx for first detection)
+                if stability.get("confirmed_tvec") is not None and stability.get("confirmed_rvec") is not None:
                     if filter_config.enable_kalman_filter and marker_id in kalman_filters:
                         # Get smoothed pose from Kalman filter (after correction)
                         kalman = kalman_filters[marker_id]
@@ -647,10 +647,8 @@ def main():
                         # Use confirmed pose directly when Kalman is disabled
                         tvec = stability.get("confirmed_tvec")
                         rvec = stability.get("confirmed_rvec")
-                        if tvec is None or rvec is None:
-                            continue
                 else:
-                    # Skip if not detected in current frame
+                    # Skip if no confirmed pose available
                     continue
                 
                 # Get object pose from marker pose
@@ -659,6 +657,12 @@ def main():
                     object_tvec, object_rvec = estimate_object_pose_from_marker(
                         (tvec, rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
                     )
+                except Exception as e:
+                    if not headless_mode:
+                        print(f"[{marker_id}] Error estimating object pose: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    continue
                 except ValueError as e:
                     # Skip markers with old/invalid JSON format
                     continue

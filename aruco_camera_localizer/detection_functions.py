@@ -21,6 +21,52 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
+def cleanup_old_markers(kalman_filters, marker_stabilities, last_seen_frames, current_frame, 
+                         detected_marker_ids, cleanup_threshold=300, talk=True):
+    """
+    Remove markers that haven't been seen for a long time to prevent unbounded dictionary growth.
+    
+    Args:
+        kalman_filters: Dictionary of Kalman filters by marker ID
+        marker_stabilities: Dictionary of marker stability data by marker ID
+        last_seen_frames: Dictionary of last seen frame numbers by marker ID
+        current_frame: Current frame number
+        detected_marker_ids: Set of marker IDs detected in current frame (don't remove these)
+        cleanup_threshold: Number of frames since last seen before removal (default: 300 = ~10s at 30fps)
+        talk: Whether to print debug messages
+    """
+    markers_to_remove = []
+    
+    for marker_id in list(kalman_filters.keys()):
+        # Don't remove markers that are currently detected
+        if marker_id in detected_marker_ids:
+            continue
+        
+        # Check how long since this marker was last seen
+        last_seen = last_seen_frames.get(marker_id, 0)
+        frames_since_last_seen = current_frame - last_seen
+        
+        # Remove if not seen for longer than threshold
+        if frames_since_last_seen > cleanup_threshold:
+            markers_to_remove.append(marker_id)
+    
+    # Remove old markers from all dictionaries
+    for marker_id in markers_to_remove:
+        last_seen = last_seen_frames.get(marker_id, 0)
+        frames_since_last_seen = current_frame - last_seen
+        
+        if marker_id in kalman_filters:
+            del kalman_filters[marker_id]
+        if marker_id in marker_stabilities:
+            del marker_stabilities[marker_id]
+        if marker_id in last_seen_frames:
+            del last_seen_frames[marker_id]
+        
+        if talk:
+            print(f"[Cleanup] Removed marker {marker_id} (not seen for {frames_since_last_seen} frames)")
+    
+    return len(markers_to_remove)
+
 def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                   kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, 
                   filter_config=None, talk=True, robot_moving=True):
@@ -31,12 +77,16 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
     half_size = marker_size / 2
     
     # Validate camera pose (if it's wrong, all transformations will be wrong)
+    # But don't block marker detection - just warn and skip world frame transformations
+    camera_pose_valid = True
     if cam_pos is None or cam_quat is None:
-        return  # Skip processing if camera pose is not available
-    if np.any(np.isnan(cam_pos)) or np.any(np.isinf(cam_pos)) or np.any(np.isnan(cam_quat)) or np.any(np.isinf(cam_quat)):
+        camera_pose_valid = False
         if talk and estimate_pose.debug_counter % 30 == 0:
-            print(f"WARNING: Invalid camera pose - pos: {cam_pos}, quat: {cam_quat}")
-        return  # Skip processing if camera pose is invalid
+            print(f"WARNING: Camera pose not available - will detect markers but skip world frame transforms")
+    elif np.any(np.isnan(cam_pos)) or np.any(np.isinf(cam_pos)) or np.any(np.isnan(cam_quat)) or np.any(np.isinf(cam_quat)):
+        camera_pose_valid = False
+        if talk and estimate_pose.debug_counter % 30 == 0:
+            print(f"WARNING: Invalid camera pose - pos: {cam_pos}, quat: {cam_quat} - will detect markers but skip world frame transforms")
     
     # Static counter to reduce debug output frequency
     if not hasattr(estimate_pose, 'debug_counter'):
@@ -44,6 +94,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
     estimate_pose.debug_counter += 1
 
     if corners and ids:
+        
         for corner, marker_id in zip(corners, ids):
             marker_id = int(marker_id)
 
@@ -80,59 +131,98 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                 [-half_size, -half_size, 0]
             ], dtype=np.float32)
 
-            success, rvec, tvec = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs)
-            if success:
+            # Use IPPE_SQUARE flag like the simple detection for better accuracy
+            try:
+                success, rvec, tvec = cv2.solvePnP(
+                    object_points, image_points, camera_matrix, dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE
+                )
+                if not success:
+                    if talk and estimate_pose.debug_counter % 30 == 0:
+                        print(f"[{marker_id}] solvePnP failed")
+                    continue
+            except Exception as e:
+                if talk:
+                    print(f"[{marker_id}] solvePnP exception: {e}")
+                continue
+            
+            # Process successful pose estimation
+            try:
                 tvec_flat = tvec.flatten()
+            except Exception as e:
+                if talk:
+                    print(f"[{marker_id}] Error flattening tvec: {e}")
+                continue
+            
+            # Calculate reprojection error for measurement quality
+            projected_points, _ = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs)
+            projected_points = projected_points.reshape(-1, 2)
+            reprojection_errors = np.linalg.norm(image_points - projected_points, axis=1)
+            rms_error = np.sqrt(np.mean(reprojection_errors**2))
+            
+            # Convert RMS error to quality score (0.0-1.0)
+            # Lower error = higher quality
+            # Typical good error: < 1 pixel, bad error: > 5 pixels
+            max_acceptable_error = filter_config.max_acceptable_error
+            measurement_quality = max(0.0, min(1.0, 1.0 - (rms_error / max_acceptable_error)))
+            
+            # Update quality history
+            stability = marker_stabilities[marker_id]
+            quality_history = stability.get("quality_history", [])
+            quality_history.append(measurement_quality)
+            max_history = filter_config.quality_history_size
+            if len(quality_history) > max_history:
+                quality_history.pop(0)
+            stability["quality_history"] = quality_history
+            
+            # Use rolling average for current quality
+            avg_quality = np.mean(quality_history) if quality_history else measurement_quality
+            stability["measurement_quality"] = avg_quality
+            
+            # Z-range validation filter
+            if filter_config.enable_z_range_validation:
+                min_z = filter_config.z_range_min
+                max_z = filter_config.z_range_max
+                if tvec_flat[2] < min_z or tvec_flat[2] > max_z:
+                    # Outlier: Z out of reasonable range
+                    if talk and estimate_pose.debug_counter % 30 == 0:
+                        print(f"[{marker_id}] Outlier: Z={tvec_flat[2]:.3f}m out of range [{min_z:.3f}, {max_z:.3f}]")
+                    continue
+            
+            # Check if marker hasn't been seen for a long time - if so, clear stale pose data
+            # This prevents comparing new detections against very old positions
+            # Only clear if marker was previously seen (last_seen > 0), not on first detection
+            last_seen = last_seen_frames.get(marker_id, 0)
+            if last_seen > 0:  # Only check if marker was previously seen
+                frames_since_last_seen = current_frame - last_seen
+                stale_pose_threshold = 60  # frames - ~2 seconds at 30fps
                 
-                # Calculate reprojection error for measurement quality
-                projected_points, _ = cv2.projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs)
-                projected_points = projected_points.reshape(-1, 2)
-                reprojection_errors = np.linalg.norm(image_points - projected_points, axis=1)
-                rms_error = np.sqrt(np.mean(reprojection_errors**2))
-                
-                # Convert RMS error to quality score (0.0-1.0)
-                # Lower error = higher quality
-                # Typical good error: < 1 pixel, bad error: > 5 pixels
-                max_acceptable_error = filter_config.max_acceptable_error
-                measurement_quality = max(0.0, min(1.0, 1.0 - (rms_error / max_acceptable_error)))
-                
-                # Update quality history
-                stability = marker_stabilities[marker_id]
-                quality_history = stability.get("quality_history", [])
-                quality_history.append(measurement_quality)
-                max_history = filter_config.quality_history_size
-                if len(quality_history) > max_history:
-                    quality_history.pop(0)
-                stability["quality_history"] = quality_history
-                
-                # Use rolling average for current quality
-                avg_quality = np.mean(quality_history) if quality_history else measurement_quality
-                stability["measurement_quality"] = avg_quality
-                
-                # Z-range validation filter
-                if filter_config.enable_z_range_validation:
-                    min_z = filter_config.z_range_min
-                    max_z = filter_config.z_range_max
-                    if tvec_flat[2] < min_z or tvec_flat[2] > max_z:
-                        # Outlier: Z out of reasonable range
-                        if talk and estimate_pose.debug_counter % 30 == 0:
-                            print(f"[{marker_id}] Outlier: Z={tvec_flat[2]:.3f}m out of range [{min_z:.3f}, {max_z:.3f}]")
-                        continue
-                
-                # Adaptive outlier rejection using Mahalanobis distance
-                # Track measurement history and compute adaptive thresholds
-                measurement_history = stability.get("measurement_history", [])
-                max_history = filter_config.mahalanobis_measurement_history_size
-                
-                # Check against confirmed pose if available, otherwise check against last known pose
-                check_tvec = stability.get("confirmed_tvec") if stability.get("confirmed_tvec") is not None else stability.get("last_known_tvec")
-                check_rvec = stability.get("confirmed_rvec") if stability.get("confirmed_rvec") is not None else stability.get("last_known_rvec")
-                
-                # Track if this measurement should be rejected
-                is_outlier = False
-                
-                # Mahalanobis distance outlier rejection filter
-                if filter_config.enable_mahalanobis_outlier_rejection and check_tvec is not None and check_rvec is not None and len(measurement_history) >= 3:
+                if frames_since_last_seen > stale_pose_threshold:
+                    # Marker hasn't been seen for a while - clear stale pose data to allow fresh start
+                    stability["confirmed_tvec"] = None
+                    stability["confirmed_rvec"] = None
+                    stability["last_known_tvec"] = None
+                    stability["last_known_rvec"] = None
+                    stability["confirmed"] = False
+                    stability["measurement_history"] = []  # Clear history too
+                    stability["rejection_count"] = 0  # Reset rejection count
+                    if talk and estimate_pose.debug_counter % 30 == 0:
+                        print(f"[{marker_id}] Cleared stale pose data after {frames_since_last_seen} frames - allowing fresh detection")
+            
+            # Adaptive outlier rejection using Mahalanobis distance
+            # Track measurement history and compute adaptive thresholds
+            measurement_history = stability.get("measurement_history", [])
+            max_history = filter_config.mahalanobis_measurement_history_size
+            
+            # Check against confirmed pose if available, otherwise check against last known pose
+            check_tvec = stability.get("confirmed_tvec") if stability.get("confirmed_tvec") is not None else stability.get("last_known_tvec")
+            check_rvec = stability.get("confirmed_rvec") if stability.get("confirmed_rvec") is not None else stability.get("last_known_rvec")
+            
+            # Track if this measurement should be rejected
+            is_outlier = False
+            
+            # Mahalanobis distance outlier rejection filter
+            if filter_config.enable_mahalanobis_outlier_rejection and check_tvec is not None and check_rvec is not None and len(measurement_history) >= 3:
                     # Calculate measurement statistics from history
                     recent_tvecs = [m["tvec"] for m in measurement_history[-10:]]  # Last 10 measurements
                     recent_rvecs = [m["rvec"] for m in measurement_history[-10:]]
@@ -207,20 +297,38 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                         else:
                             if talk and estimate_pose.debug_counter % 30 == 0:
                                 print(f"[{marker_id}] Outlier (Mahal): pos={mahal_distance_pos:.2f} (thresh={adaptive_mahal_threshold:.2f}), rot={mahal_distance_rot:.2f}")
+            
+            # Fallback to simple distance check if not enough history
+            elif filter_config.enable_simple_outlier_rejection and check_tvec is not None and check_rvec is not None:
+                # Use simple distance-based rejection as fallback
+                distance = np.linalg.norm(tvec_flat - check_tvec)
+                if robot_moving:
+                    outlier_rejection_movement_threshold = filter_config.simple_outlier_movement_threshold_moving
+                    outlier_rejection_rotation_threshold = filter_config.simple_outlier_rotation_threshold_moving
+                else:
+                    outlier_rejection_movement_threshold = filter_config.simple_outlier_movement_threshold_stationary
+                    outlier_rejection_rotation_threshold = filter_config.simple_outlier_rotation_threshold_stationary
                 
-                # Fallback to simple distance check if not enough history
-                elif filter_config.enable_simple_outlier_rejection and check_tvec is not None and check_rvec is not None:
-                    # Use simple distance-based rejection as fallback
-                    distance = np.linalg.norm(tvec_flat - check_tvec)
-                    if robot_moving:
-                        outlier_rejection_movement_threshold = filter_config.simple_outlier_movement_threshold_moving
-                        outlier_rejection_rotation_threshold = filter_config.simple_outlier_rotation_threshold_moving
-                    else:
-                        outlier_rejection_movement_threshold = filter_config.simple_outlier_movement_threshold_stationary
-                        outlier_rejection_rotation_threshold = filter_config.simple_outlier_rotation_threshold_stationary
+                # Reject if distance exceeds threshold (fixed: was checking wrong condition)
+                if distance > outlier_rejection_movement_threshold:
+                    is_outlier = True
+                    stability["rejection_count"] = stability.get("rejection_count", 0) + 1
+                    if stability["rejection_count"] > filter_config.simple_outlier_rejection_count_threshold:
+                        stability["last_known_tvec"] = None
+                        stability["last_known_rvec"] = None
+                        stability["rejection_count"] = 0
+                    if talk and estimate_pose.debug_counter % 30 == 0:
+                        print(f"[{marker_id}] Outlier (distance): {distance*1000:.1f}mm > {outlier_rejection_movement_threshold*1000:.1f}mm")
+                
+                # Check rotation (only if distance check passed)
+                if not is_outlier:
+                    R_current, _ = cv2.Rodrigues(rvec)
+                    R_check, _ = cv2.Rodrigues(check_rvec)
+                    R_relative = R_current @ R_check.T
+                    rvec_relative, _ = cv2.Rodrigues(R_relative)
+                    rotation_angle = np.linalg.norm(rvec_relative)
                     
-                    # Reject if distance exceeds threshold (fixed: was checking wrong condition)
-                    if distance > outlier_rejection_movement_threshold:
+                    if rotation_angle > outlier_rejection_rotation_threshold:
                         is_outlier = True
                         stability["rejection_count"] = stability.get("rejection_count", 0) + 1
                         if stability["rejection_count"] > filter_config.simple_outlier_rejection_count_threshold:
@@ -228,105 +336,98 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                             stability["last_known_rvec"] = None
                             stability["rejection_count"] = 0
                         if talk and estimate_pose.debug_counter % 30 == 0:
-                            print(f"[{marker_id}] Outlier (distance): {distance*1000:.1f}mm > {outlier_rejection_movement_threshold*1000:.1f}mm")
-                    
-                    # Check rotation (only if distance check passed)
-                    if not is_outlier:
-                        R_current, _ = cv2.Rodrigues(rvec)
-                        R_check, _ = cv2.Rodrigues(check_rvec)
-                        R_relative = R_current @ R_check.T
-                        rvec_relative, _ = cv2.Rodrigues(R_relative)
-                        rotation_angle = np.linalg.norm(rvec_relative)
-                        
-                        if rotation_angle > outlier_rejection_rotation_threshold:
-                            is_outlier = True
-                            stability["rejection_count"] = stability.get("rejection_count", 0) + 1
-                            if stability["rejection_count"] > filter_config.simple_outlier_rejection_count_threshold:
-                                stability["last_known_tvec"] = None
-                                stability["last_known_rvec"] = None
-                                stability["rejection_count"] = 0
-                            if talk and estimate_pose.debug_counter % 30 == 0:
-                                print(f"[{marker_id}] Outlier (rotation): {np.degrees(rotation_angle):.1f}° > {np.degrees(outlier_rejection_rotation_threshold):.1f}°")
-                
-                # Skip this measurement if it's an outlier
-                if is_outlier:
-                    continue
-                
-                # Only add measurement to history after it passes all filters
-                measurement_history.append({
-                    "tvec": tvec_flat.copy(),
-                    "rvec": rvec.copy(),
-                    "frame": current_frame
-                })
-                if len(measurement_history) > max_history:
-                    measurement_history.pop(0)
-                stability["measurement_history"] = measurement_history
-                
-                # Reset rejection count if measurement passes
-                stability["rejection_count"] = 0
-                stability["missed_frames"] = 0  # Reset missed frames counter
-                
-                # Update last tvec
-                stability["last_tvec"] = tvec_flat
-                stability["last_frame"] = current_frame
-                
-                # Confirm immediately (no hold counter)
-                stability["confirmed"] = True
-                
-                # Marker stability confirmation smoothing filter
-                if filter_config.enable_marker_stability_smoothing:
-                    # Update confirmed baseline with temporal smoothing to reduce flickering
-                    # When stationary, use more aggressive smoothing (smaller alpha = more smoothing)
-                    # When moving, use less smoothing to track movement better
-                    if robot_moving:
-                        smoothing_alpha = filter_config.stability_smoothing_alpha_moving
-                    else:
-                        smoothing_alpha = filter_config.stability_smoothing_alpha_stationary
-                    
-                    if stability["confirmed_tvec"] is not None and stability["confirmed_rvec"] is not None:
-                        # Blend position (linear interpolation)
-                        prev_tvec = stability["confirmed_tvec"]
-                        smoothed_tvec = (1.0 - smoothing_alpha) * prev_tvec + smoothing_alpha * tvec_flat
-                        
-                        # Blend orientation (SLERP for quaternions)
-                        prev_rvec = stability["confirmed_rvec"]
-                        prev_quat = rvec_to_quat(prev_rvec)
-                        current_quat = rvec_to_quat(rvec)
-                        smoothed_quat = slerp_quat(prev_quat, current_quat, blend=smoothing_alpha)
-                        smoothed_rvec = quat_to_rvec(smoothed_quat)
-                        
-                        # Update confirmed baseline with smoothed values
-                        stability["confirmed_tvec"] = smoothed_tvec.copy()
-                        stability["confirmed_rvec"] = smoothed_rvec.copy()
-                    else:
-                        # First confirmation - use measurement directly
-                        stability["confirmed_tvec"] = tvec_flat.copy()
-                        stability["confirmed_rvec"] = rvec.copy()
+                            print(f"[{marker_id}] Outlier (rotation): {np.degrees(rotation_angle):.1f}° > {np.degrees(outlier_rejection_rotation_threshold):.1f}°")
+            
+            # Skip this measurement if it's an outlier
+            if is_outlier:
+                if talk and estimate_pose.debug_counter % 30 == 0:
+                    print(f"[{marker_id}] Rejected as outlier")
+                continue
+            
+            # Only add measurement to history after it passes all filters
+            measurement_history.append({
+                "tvec": tvec_flat.copy(),
+                "rvec": rvec.copy(),
+                "frame": current_frame
+            })
+            if len(measurement_history) > max_history:
+                measurement_history.pop(0)
+            stability["measurement_history"] = measurement_history
+            
+            # Reset rejection count if measurement passes
+            stability["rejection_count"] = 0
+            stability["missed_frames"] = 0  # Reset missed frames counter
+            
+            # Update last tvec
+            stability["last_tvec"] = tvec_flat
+            stability["last_frame"] = current_frame
+            
+            # Confirm immediately (no hold counter)
+            stability["confirmed"] = True
+            
+            # Marker stability confirmation smoothing filter
+            if filter_config.enable_marker_stability_smoothing:
+                # Update confirmed baseline with temporal smoothing to reduce flickering
+                # When stationary, use more aggressive smoothing (smaller alpha = more smoothing)
+                # When moving, use less smoothing to track movement better
+                if robot_moving:
+                    smoothing_alpha = filter_config.stability_smoothing_alpha_moving
                 else:
-                    # No smoothing - use measurement directly
+                    smoothing_alpha = filter_config.stability_smoothing_alpha_stationary
+                
+                if stability["confirmed_tvec"] is not None and stability["confirmed_rvec"] is not None:
+                    # Blend position (linear interpolation)
+                    prev_tvec = stability["confirmed_tvec"]
+                    smoothed_tvec = (1.0 - smoothing_alpha) * prev_tvec + smoothing_alpha * tvec_flat
+                    
+                    # Blend orientation (SLERP for quaternions)
+                    prev_rvec = stability["confirmed_rvec"]
+                    prev_quat = rvec_to_quat(prev_rvec)
+                    current_quat = rvec_to_quat(rvec)
+                    smoothed_quat = slerp_quat(prev_quat, current_quat, blend=smoothing_alpha)
+                    smoothed_rvec = quat_to_rvec(smoothed_quat)
+                    
+                    # Update confirmed baseline with smoothed values
+                    stability["confirmed_tvec"] = smoothed_tvec.copy()
+                    stability["confirmed_rvec"] = smoothed_rvec.copy()
+                else:
+                    # First confirmation - use measurement directly
                     stability["confirmed_tvec"] = tvec_flat.copy()
                     stability["confirmed_rvec"] = rvec.copy()
-                
-                # Also update last known pose for outlier checking after reset
-                stability["last_known_tvec"] = tvec_flat.copy()
-                stability["last_known_rvec"] = rvec.copy()
+            else:
+                # No smoothing - use measurement directly
+                stability["confirmed_tvec"] = tvec_flat.copy()
+                stability["confirmed_rvec"] = rvec.copy()
+            
+            # Also update last known pose for outlier checking after reset
+            stability["last_known_tvec"] = tvec_flat.copy()
+            stability["last_known_rvec"] = rvec.copy()
 
-                # Kalman filter correction
-                if filter_config.enable_kalman_filter:
-                    measured_quat = rvec_to_quat(rvec)
-                    pred_tvec, pred_rvec = kalman.predict()
-                    pred_quat = rvec_to_quat(pred_rvec)
-                    
-                    # Use Kalman filter properly - let it handle the blending internally
-                    # Only use manual blending for very noisy measurements
-                    # Pass robot_moving flag to use minimum z when robot is stationary
-                    kalman.correct(tvec_flat, rvec, robot_moving=robot_moving)
+            # Kalman filter correction
+            if filter_config.enable_kalman_filter:
+                measured_quat = rvec_to_quat(rvec)
+                pred_tvec, pred_rvec = kalman.predict()
+                pred_quat = rvec_to_quat(pred_rvec)
+                
+                # Use Kalman filter properly - let it handle the blending internally
+                # Only use manual blending for very noisy measurements
+                # Pass robot_moving flag to use minimum z when robot is stationary
+                kalman.correct(tvec_flat, rvec, robot_moving=robot_moving)
                 last_seen_frames[marker_id] = current_frame
 
+    # Get set of currently detected marker IDs for cleanup and confirmation reset
+    detected_marker_ids = set(int(id_val) for id_val in ids) if ids is not None else set()
+    
+    # Cleanup old markers periodically to prevent unbounded dictionary growth
+    # Run cleanup every 60 frames (~2 seconds at 30fps) to balance performance and memory
+    cleanup_frequency = 60
+    if current_frame % cleanup_frequency == 0:
+        cleanup_old_markers(kalman_filters, marker_stabilities, last_seen_frames, current_frame,
+                           detected_marker_ids, cleanup_threshold=300, talk=talk)
+    
     # Reset confirmation for markers not detected in current frame
     # Only reset after multiple consecutive missed frames to reduce flickering
     if filter_config.enable_marker_confirmation_reset:
-        detected_marker_ids = set(int(id_val) for id_val in ids) if ids is not None else set()
         missed_frames_threshold = filter_config.marker_confirmation_missed_frames_threshold
         
         for marker_id in list(kalman_filters.keys()):

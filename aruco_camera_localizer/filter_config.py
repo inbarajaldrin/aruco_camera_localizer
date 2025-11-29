@@ -21,34 +21,34 @@ class FilterConfig:
         # =====================================================================
         
         # 1. Kalman Filtering - Temporal smoothing of position and orientation
-        self.enable_kalman_filter = True
+        self.enable_kalman_filter = False
         
         # 2. Z-Range Validation - Rejects markers outside valid depth range
-        self.enable_z_range_validation = True
+        self.enable_z_range_validation = False
         
         # 3. Mahalanobis Distance Outlier Rejection - Statistical outlier detection
-        self.enable_mahalanobis_outlier_rejection = True
+        self.enable_mahalanobis_outlier_rejection = False
         
         # 4. Simple Distance/Rotation Outlier Rejection - Fallback outlier detection
-        self.enable_simple_outlier_rejection = True
+        self.enable_simple_outlier_rejection = False
         
         # 5. Quality Threshold Filtering - Rejects low-quality detections
-        self.enable_quality_threshold = True
+        self.enable_quality_threshold = False
         
         # 6. Movement Validation - Validates object movement between frames
-        self.enable_movement_validation = True
+        self.enable_movement_validation = False
         
         # 7. SLERP Smoothing - Quaternion smoothing for orientation
-        self.enable_slerp_smoothing = True
+        self.enable_slerp_smoothing = False
         
         # 8. Marker Stability Confirmation Smoothing - Temporal smoothing of confirmed pose
-        self.enable_marker_stability_smoothing = True
+        self.enable_marker_stability_smoothing = False
         
         # 9. Ghost Tracking - Pose holding when markers not detected
-        self.enable_ghost_tracking = True
+        self.enable_ghost_tracking = False
         
         # 10. Marker Confirmation Reset - Resets confirmation after missed frames
-        self.enable_marker_confirmation_reset = True
+        self.enable_marker_confirmation_reset = False
         
         # =====================================================================
         # FILTER PARAMETERS
