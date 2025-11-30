@@ -45,16 +45,6 @@ ARUCO_DICTS = {
     "DICT_4X4_250": aruco.DICT_4X4_250,
     # "DICT_5X5_250": aruco.DICT_5X5_250
 }
-OBJECT_DICTS = { # mm
-    "allen_key": [38.8, 102.6, 129.5],
-    "wrench": [37, 70, 70]
-}
-TARGET_POSES = {
-    # position mm and orientation degrees
-    "jenga": ([40, -600, 10], [0, 0, 0]),
-    "wrench": ([40, -600, 10], [0, 0, 0]),
-    "allen_key": ([40, -600, 10], [0, 0, 0]),
-}
 
 # Dynamic Color Range Configuration
 # Add or remove color ranges here - the rest of the code will automatically adjust
@@ -81,9 +71,9 @@ COLOR_VISUALIZATION = {
 
 trackers = {}
 
-def start_ros_node():
+def start_ros_node(camera_topic='/camera/image_raw'):
     rclpy.init()
-    node = LocalizerBridge()
+    node = LocalizerBridge(camera_topic=camera_topic, depth_topic=None)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
     return node
@@ -92,6 +82,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run ArUco pose tracker with optional camera ID.")
     parser.add_argument("--camera-id", type=int, default=None,
                         help="Camera device ID to use (e.g., 8). If not set, will scan and prompt.")
+    parser.add_argument("--camera-topic", type=str, default=None,
+                        help="ROS2 topic to subscribe for camera images (e.g., /camera/image_raw). If provided, uses ROS topic instead of camera ID.")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     return parser.parse_args()
@@ -111,48 +103,72 @@ def match_points(new_blobs, unconfirmed_blobs, confirmed_blobs):
 
 def main():
     args = parse_args()
-    bridge_node = start_ros_node()
+    
+    # Determine if using ROS topic or camera ID
+    use_ros_topic = args.camera_topic is not None
+    camera_topic = args.camera_topic if args.camera_topic else '/camera/image_raw'
+    
+    # Start ROS node (always needed for pose subscriptions)
+    # If using direct camera capture, still pass a topic (won't be used, but LocalizerBridge needs it)
+    bridge_node = start_ros_node(camera_topic=camera_topic)
 
     kalman_filters = {}
     marker_stabilities = {}
     last_seen_frames = {}
     frame_idx = 0
 
-    if args.camera_id is not None:
-        cam_id = args.camera_id
-    else:        
-        available = detect_available_cameras()
-        if not available:
-            return
-        cam_id = select_camera(available)
-        if cam_id is None:
-            return
-
     talk = not args.suppress_prints
 
-    cap = cv2.VideoCapture(cam_id)
-    if not cap.isOpened():
-        return
-
+    # Set up camera source (either ROS topic or direct camera capture)
+    cap = None
     parameters = aruco.DetectorParameters()
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, c_width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c_height)
-    cap.set(cv2.CAP_PROP_AUTO_WB, 0)
-    cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4500)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
-    cap.set(cv2.CAP_PROP_EXPOSURE, -7.0)
+    
+    if not use_ros_topic:
+        if args.camera_id is not None:
+            cam_id = args.camera_id
+        else:        
+            available = detect_available_cameras()
+            if not available:
+                return
+            cam_id = select_camera(available)
+            if cam_id is None:
+                return
+
+        cap = cv2.VideoCapture(cam_id)
+        if not cap.isOpened():
+            return
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, c_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c_height)
+        cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4500)
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
+        cap.set(cv2.CAP_PROP_EXPOSURE, -7.0)
+    else:
+        print(f"Using ROS topic: {camera_topic}")
+        print("Waiting for camera frames...")
+    
     print("Press 'q' to quit.")
 
     detected_objects = []
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+        # Get frame from either ROS topic or camera capture
+        if use_ros_topic:
+            frame = bridge_node.get_latest_frame()
+            if frame is None:
+                import time
+                time.sleep(0.01)  # 10ms
+                continue
+            ret = True
+        else:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
         frame_idx += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        identified_jenga = []
+        identified_aruco = []
         ee_pos, ee_quat = bridge_node.get_ee_pose()
         cam_pos, cam_quat = bridge_node.get_camera_pose()
 
@@ -168,29 +184,34 @@ def main():
                 rquat = rvec_to_quat(rvec)
                 world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
                 world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
-                identified_jenga.append({
-                                    "name": f"jenga_{marker_id}",
+                identified_aruco.append({
+                                    "name": f"aruco_{marker_id}",
                                     "points": [world_pos],
                                     "position": world_pos,
                                     "quaternion": world_rot,
                                     'inferred': False,
                                 })
 
-        objects = identified_jenga + detected_objects
+        objects = identified_aruco + detected_objects
 
         identified_objects = []
 
         detected_objects = identified_objects.copy()
         # Camera pose is published by external package, we only subscribe to it
-        bridge_node.publish_object_poses(identified_objects+identified_jenga)
-        draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
-        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
+        bridge_node.publish_object_poses(identified_objects+identified_aruco)
+        bridge_node.publish_aruco_poses(identified_objects+identified_aruco)
+        draw_text(frame, cam_pos, cam_quat, identified_objects+identified_aruco, frame_idx, ee_pos, ee_quat)
+        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_aruco, [])
 
+        # Publish the annotated frame
+        bridge_node.publish_annotated_image(frame)
+        
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    cap.release()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":

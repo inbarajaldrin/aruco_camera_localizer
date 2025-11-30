@@ -129,6 +129,8 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                 stability["last_frame"] = current_frame
 
                 if stability["hold_counter"] >= hold_required:
+                    # Only print when marker is first confirmed (transitions from unconfirmed to confirmed)
+                    was_confirmed = stability["confirmed"]
                     stability["confirmed"] = True
 
                     measured_quat = rvec_to_quat(rvec)
@@ -144,11 +146,9 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     # Convert to world frame
                     marker_pos_world = transform_point_cam_to_world(blended_tvec, cam_pos, cam_quat)
                     marker_quat_world = transform_orientation_cam_to_world(blended_quat, cam_quat)
-                    if talk:
-                        print(f"[{marker_id}] Confirmed: t={tvec_flat}, r={rvec.flatten()}")
-                        print(f"[{marker_id}] WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
-                elif talk:
-                    print(f"[{marker_id}] Holding: t={tvec_flat}, hold={stability['hold_counter']}")
+                    # Only print on first confirmation
+                    if talk and not was_confirmed:
+                        print(f"[{marker_id}] ArUco marker confirmed: Pos={marker_pos_world}, Quat={marker_quat_world}")
 
 
     for marker_id, kalman in kalman_filters.items():
@@ -160,14 +160,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
         if current_frame - last_seen < 15:
             pred_tvec, pred_rvec = kalman.predict()
             # cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, pred_rvec, pred_tvec, marker_size * 0.5)
-            if not current_frame == last_seen:
-                # Convert to world frame
-                pred_quat = rvec_to_quat(pred_rvec)
-                marker_pos_world = transform_point_cam_to_world(pred_tvec, cam_pos, cam_quat)
-                marker_quat_world = transform_orientation_cam_to_world(pred_quat, cam_quat)
-                if talk:
-                    print(f"[{marker_id}] Ghost: t={pred_tvec}, r={pred_rvec}")
-                    print(f"[{marker_id}] GHOST WORLD Pose:\n  Pos: {marker_pos_world}\n  Quat: {marker_quat_world}")
+            # Ghost predictions are used internally but not printed to reduce verbosity
         else:
             stability["confirmed"] = False
 

@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, Point, TransformStamped, Transform, Vector3, Quaternion
 from std_msgs.msg import Header, ColorRGBA, String
 from sensor_msgs.msg import Image
@@ -101,7 +102,13 @@ class LocalizerBridge(Node):
         self.bridge = CvBridge()
         
         # Clean approach: Single topic with proper structured data using TFMessage
-        self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses', 10)
+        # Use BEST_EFFORT QoS to match ros2 topic echo default
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            depth=10
+        )
+        self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses', qos_profile)
+        self.aruco_poses_pub = self.create_publisher(TFMessage, '/aruco_poses', qos_profile)
         
 
     def publish_annotated_image(self, frame):
@@ -195,7 +202,7 @@ class LocalizerBridge(Node):
             transform = TransformStamped()
             transform.header.stamp = now
             transform.header.frame_id = "base"  # Parent frame
-            transform.child_frame_id = obj["name"]  # Object name as child frame (e.g., "jenga_3", "wrench")
+            transform.child_frame_id = obj["name"]  # Object name as child frame (e.g., "aruco_3")
             
             # Set translation (position)
             transform.transform.translation = Vector3(
@@ -216,4 +223,41 @@ class LocalizerBridge(Node):
         
         # Publish the TF message
         self.object_poses_pub.publish(msg)
+
+    def publish_aruco_poses(self, object_data):
+        """Publish ArUco marker poses as TF transforms using TFMessage to /aruco_poses topic"""
+        now = self.get_clock().now().to_msg()
+        
+        # Create TFMessage with array of transforms
+        msg = TFMessage()
+        
+        # Filter for ArUco markers only (names starting with "aruco_")
+        aruco_objects = [obj for obj in object_data if obj["name"].startswith("aruco_")]
+        
+        # Add each ArUco marker as a TransformStamped
+        for obj in aruco_objects:
+            transform = TransformStamped()
+            transform.header.stamp = now
+            transform.header.frame_id = "base"  # Parent frame
+            transform.child_frame_id = obj["name"]  # Object name as child frame (e.g., "aruco_3")
+            
+            # Set translation (position)
+            transform.transform.translation = Vector3(
+                x=float(obj["position"][0]),
+                y=float(obj["position"][1]),
+                z=float(obj["position"][2])
+            )
+            
+            # Set rotation (orientation as quaternion)
+            transform.transform.rotation = Quaternion(
+                x=float(obj["quaternion"][0]),
+                y=float(obj["quaternion"][1]),
+                z=float(obj["quaternion"][2]),
+                w=float(obj["quaternion"][3])
+            )
+            
+            msg.transforms.append(transform)
+        
+        # Publish the TF message to /aruco_poses
+        self.aruco_poses_pub.publish(msg)
 

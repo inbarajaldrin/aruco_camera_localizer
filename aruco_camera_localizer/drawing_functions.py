@@ -54,8 +54,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
 
 def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_objects, nearest_pushers):
     color_map = {
-        "allen_key": (0, 255, 0),   # Green
-        "wrench": (0, 0, 255),      # Red
+        # Add object-specific colors here if needed
     }
 
     for obj in identified_objects:
