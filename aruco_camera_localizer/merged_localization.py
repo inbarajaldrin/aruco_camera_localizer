@@ -7,10 +7,8 @@ from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.config_loader import get_config
 from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
 transform_points_world_to_img, transform_point_world_to_cam
-from aruco_camera_localizer.detection_functions import detect_markers, detect_color_blobs, estimate_pose, \
-    identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from aruco_camera_localizer.object_frame_definitions import define_jenga_contacts, define_jenga_contour
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_color_dot_poses
+from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines
 import threading
 import rclpy
 import argparse
@@ -151,9 +149,6 @@ def main():
         if not ret:
             break
 
-        # Publish raw camera image
-        bridge_node.publish_image(frame)
-
         frame_idx += 1
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -173,73 +168,23 @@ def main():
                 rquat = rvec_to_quat(rvec)
                 world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
                 world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
-                # Removed expensive end pose calculations for Jenga blocks
-                # world_contacts = define_jenga_contacts(world_pos, world_rot, BLOCK_WIDTH, BLOCK_LENGTH, BLOCK_THICKNESS)
-                # world_contour = define_jenga_contour(world_pos, world_rot)
                 identified_jenga.append({
                                     "name": f"jenga_{marker_id}",
                                     "points": [world_pos],
                                     "position": world_pos,
                                     "quaternion": world_rot,
                                     'inferred': False,
-                                    # "contacts": world_contacts,  # Removed
-                                    # "contour": world_contour     # Removed
                                 })
 
         objects = identified_jenga + detected_objects
 
-        # Dynamic Color Detection Section
-        detected_color_points = {}
-        all_target_points = []
-        
-        # Detect all configured colors dynamically
-        for color_name, color_range in COLOR_RANGES.items():
-            color_bgr = COLOR_VISUALIZATION.get(color_name, (255, 255, 255))
-            world_points, _ = detect_color_blobs(frame, color_range, color_bgr, CAMERA_MATRIX, cam_pos, cam_quat, 
-                                                   OPENCV_TO_CAMERA_QUAT, distance=DETECTION_DISTANCE)
-            detected_color_points[color_name] = world_points
-            all_target_points.extend(world_points)
-        
-        # Object identification (only for blue points for now)
-        if "blue" in detected_color_points:
-            identified_objects = identify_objects_from_blobs(detected_color_points["blue"], OBJECT_DICTS)
-        else:
-            identified_objects = []
-        
-        # Publish all target poses dynamically
-        bridge_node.publish_target_poses(detected_color_points)
-
-        # Pusher section removed
-        nearest_pushers = []
-
-        # Check for disappeared objects
-        missing = False
-        for det in detected_objects:
-            if not any(obj["name"] == det["name"] for obj in identified_objects):
-                missing = True
-        
-        # Attempt recovery if any objects are missing
-        if missing: 
-            blue_points = detected_color_points.get("blue", [])
-            recovered_objects = attempt_recovery_for_missing_objects(detected_objects, blue_points, known_triangles=OBJECT_DICTS)
-        else:
-            recovered_objects = None
-
-        # Avoid duplicating recovered ones already present
-        if recovered_objects:
-            for rec in recovered_objects:
-                if not any(obj["name"] == rec["name"] for obj in identified_objects):
-                    identified_objects.append(rec)
-
-        # ML prediction section removed
+        identified_objects = []
 
         detected_objects = identified_objects.copy()
         # Camera pose is published by external package, we only subscribe to it
         bridge_node.publish_object_poses(identified_objects+identified_jenga)
-        bridge_node.publish_contacts(nearest_pushers)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
-        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, nearest_pushers)
-        draw_color_dot_poses(frame, CAMERA_MATRIX, cam_pos, cam_quat, detected_color_points, COLOR_VISUALIZATION)
+        draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, [])
 
         cv2.imshow("Merged Detection", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):

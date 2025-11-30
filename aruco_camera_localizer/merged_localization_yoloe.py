@@ -1,17 +1,11 @@
 import cv2
-import cv2.aruco as aruco
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from scipy.spatial import cKDTree
 from sklearn.decomposition import PCA
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.config_loader import get_config
-from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, \
-transform_points_world_to_img, transform_point_world_to_cam
-from aruco_camera_localizer.detection_functions import detect_markers, estimate_pose, \
-    identify_objects_from_blobs, attempt_recovery_for_missing_objects
-from aruco_camera_localizer.object_frame_definitions import define_jenga_contacts, define_jenga_contour, hard_define_contour
-from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_color_dot_poses
+from aruco_camera_localizer.geometric_functions import transform_points_world_to_img
+from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines
 import threading
 import rclpy
 import argparse
@@ -74,25 +68,6 @@ def convert_2d_orientation_to_quaternion(orientation_angle, cam_quat, opencv_to_
     return world_orientation.as_quat()
 
 CAMERA_MATRIX = config.get_camera_matrix()
-DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.019  # meters
-BLOCK_LENGTH = 0.072 # meters
-BLOCK_WIDTH = 0.024 # meters
-BLOCK_THICKNESS = 0.014 # meters
-ARUCO_DICTS = {
-    "DICT_4X4_250": aruco.DICT_4X4_250,
-    # "DICT_5X5_250": aruco.DICT_5X5_250
-}
-OBJECT_DICTS = { # mm
-    "allen_key": [38.8, 102.6, 129.5],
-    "wrench": [37, 70, 70]
-}
-TARGET_POSES = {
-    # position mm and orientation degrees
-    "jenga": ([40, -600, 10], [0, 0, 0]),
-    "wrench": ([40, -600, 10], [0, 0, 0]),
-    "allen_key": ([40, -600, 10], [0, 0, 0]),
-}
 
 # YOLO detection settings - only hand detection
 YOLO_PROMPTS = ["hand"]
@@ -108,7 +83,6 @@ current_yolo_color_map = YOLO_COLOR_MAP.copy()
 # Generic color for all YOLO detections (cyan in BGR)
 GENERIC_COLOR = (255, 255, 0)
 
-pusher_distance_max = 0.030
 
 trackers = {}
 
@@ -181,10 +155,6 @@ def parse_args():
                         help="ROS2 topic to subscribe for depth images (optional, uses config distance if not provided)")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
-    parser.add_argument("--no-pushers", action='store_true',
-                        help="Stops detecting yellow and green pushers")
-    parser.add_argument("--recommend-push", action='store_true',
-                        help="For each object, recommend where to push")
     parser.add_argument("--yolo-mode", type=str, default="prompt-set",
                         help="YOLO mode: 'prompt-set' for prompted detection (default: prompt-set)")
     parser.add_argument("--yolo-model", type=str, default="aruco_camera_localizer/yoloe-11s-seg.pt",
@@ -560,22 +530,15 @@ def main():
         10
     )
 
-    kalman_filters = {}
-    marker_stabilities = {}
-    last_seen_frames = {}
     frame_idx = 0
 
     # Current YOLO prompts (will be updated dynamically)
     # These are now managed by the global functions
 
     talk = not args.suppress_prints
-    if args.recommend_push:
-        from max_camera_localizer.data_predict import predict_pusher_outputs
-
-    parameters = aruco.DetectorParameters()
     
     print("\n" + "="*60)
-    print("ArUco Camera Localizer with YOLO Detection")
+    print("YOLO Camera Localizer")
     print("="*60)
     print(f"Waiting for camera frames on {args.camera_topic}...")
     print("Make sure the camera_publisher node is running!")
@@ -583,8 +546,6 @@ def main():
     print("="*60 + "\n")
 
     detected_objects = []
-    last_pushers = {"green": None, "yellow": None}
-    unconfirmed_blobs = {"green": None, "yellow": None}
     
     try:
         while True:
@@ -605,41 +566,11 @@ def main():
             except Exception as e:
                 print(f"Error checking YOLO prompts: {e}")
 
-            # Publish raw camera image
-            bridge_node.publish_image(frame)
-
             frame_idx += 1
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-            identified_jenga = []
             ee_pos, ee_quat = bridge_node.get_ee_pose()
             cam_pos, cam_quat = bridge_node.get_camera_pose()
 
-            # Aruco Section
-            corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
-            estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
-                        kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
-
-            # After estimating pose, collect marker world positions
-            for marker_id in kalman_filters:
-                if marker_stabilities[marker_id]["confirmed"]:
-                    tvec, rvec = kalman_filters[marker_id].predict()
-                    rquat = rvec_to_quat(rvec)
-                    world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
-                    # Apply calibration offset to ArUco marker positions
-                    world_pos = bridge_node.apply_calibration_offset(world_pos)
-                    world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
-                    identified_jenga.append({
-                                        "name": f"jenga_{marker_id}",
-                                        "points": [world_pos],
-                                        "position": world_pos,
-                                        "quaternion": world_rot,
-                                        'inferred': False,
-                                    })
-
-            objects = identified_jenga + detected_objects
-
-            # YOLO Detection Section (replaces color blob detection)
+            # YOLO Detection Section
             current_prompts, current_color_map = get_yolo_prompts()
             
             # Get latest depth image if available
@@ -664,8 +595,9 @@ def main():
                     metadata_by_color[color_name] = []
                 metadata_by_color[color_name].append(metadata)
             
+            # Convert YOLO detections to objects (skip pusher colors)
             for color_name, world_points in detected_color_points.items():
-                # Skip pusher colors as they're handled separately
+                # Skip pusher colors
                 if color_name in ["green", "yellow"]:
                     continue
                 
@@ -694,139 +626,11 @@ def main():
                         'inferred': False,
                     })
             
-            # Object identification (only for blue points for now)
-            if "blue" in detected_color_points:
-                identified_objects = identify_objects_from_blobs(detected_color_points["blue"], OBJECT_DICTS)
-            else:
-                identified_objects = []
-
-            # Pusher section
-            pushers = {}
-            nearest_pushers = []
-            if not args.no_pushers:
-                # Process pusher colors from YOLO detections
-                for color_name in ["green", "yellow"]:
-                    if color_name in detected_color_points:
-                        world_points = detected_color_points[color_name]
-                        if world_points:
-                            best_point = pick_closest_blob(world_points, last_pushers.get(color_name))
-                            pushers[color_name] = (best_point, GENERIC_COLOR)
-                            last_pushers[color_name] = best_point
-
-                # Working block for pusher-object interaction detection
-                all_xyz = []
-                all_kappa = []
-                all_meta = []
-                if objects:
-                    for obj_idx, obj in enumerate(objects):
-                        if 'contour' not in obj or obj['contour'] is None:
-                            continue
-                        xyz = obj['contour']['xyz']
-                        kappa = obj['contour']['kappa']
-                        all_xyz.extend(xyz)
-                        all_kappa.extend(kappa)
-                        all_meta.extend([(obj_idx, i) for i in range(len(xyz))])
-
-                    if all_xyz:
-                        all_xyz = np.array(all_xyz)
-                        all_kappa = np.array(all_kappa)
-
-                        tree = cKDTree(all_xyz)
-
-                        for color, pusher in pushers.items():
-                            if pusher is not None:
-                                pusher_pos, col = pusher
-                                distance, contour_idx = tree.query(pusher_pos)
-                                if distance > pusher_distance_max:
-                                    continue
-                                nearest_point = all_xyz[contour_idx]
-                                kappa_value = all_kappa[contour_idx]
-                                obj_index, local_contour_index = all_meta[contour_idx]
-                                nearest_pushers.append({
-                                    'pusher_name': color,
-                                    'frame_number': frame_idx,
-                                    'color': col,
-                                    'pusher_location': pusher_pos,
-                                    'nearest_point': nearest_point,
-                                    'kappa': kappa_value,
-                                    'object_index': obj_index,
-                                    'local_contour_index': local_contour_index
-                                })
-
-            # Check for disappeared objects
-            missing = False
-            for det in detected_objects:
-                if not any(obj["name"] == det["name"] for obj in identified_objects):
-                    missing = True
-            
-            # Attempt recovery if any objects are missing
-            if missing: 
-                blue_points = detected_color_points.get("blue", [])
-                recovered_objects = attempt_recovery_for_missing_objects(detected_objects, blue_points, known_triangles=OBJECT_DICTS)
-            else:
-                recovered_objects = None
-
-            # Avoid duplicating recovered ones already present
-            if recovered_objects:
-                for rec in recovered_objects:
-                    if not any(obj["name"] == rec["name"] for obj in identified_objects):
-                        identified_objects.append(rec)
-
-            # Bonus: For the ML test run, predict where the pushers should go
-            for obj in identified_objects+identified_jenga:
-                color = (255, 255, 0)
-                name = obj["name"]
-                if "jenga" in name:
-                    name = "jenga"
-                if name in ["allen_key", "wrench", "jenga"] and 'contour' in obj and obj['contour'] is not None:
-                    if args.recommend_push:
-                        posex = obj["position"][0]
-                        posey = obj["position"][1]
-                        objquat = obj["quaternion"]
-                        objeuler = R.from_quat(objquat).as_euler('xyz')
-                        oriy = objeuler[2]
-                        prediction = predict_pusher_outputs(name, posex, posey, oriy, TARGET_POSES[name])
-                        index = prediction['predicted_index']
-
-                        # Draw predicted points
-                        recommended = []
-                        for ind in index:
-                            label = f"pusher recommended @ contour {ind}"
-                            pusher_point_world = obj['contour']['xyz'][ind]
-                            pusher_point_img = transform_points_world_to_img([pusher_point_world], cam_pos, cam_quat, CAMERA_MATRIX)
-                            pusher_point_normal = obj['contour']['normals'][ind]
-
-                            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                            cv2.rectangle(frame, (pusher_point_img[0][0] - 20, pusher_point_img[0][1] - h - 20 - 5), (pusher_point_img[0][0] + w - 20, pusher_point_img[0][1] - 20 + 5), (0, 0, 0), -1)
-                            cv2.putText(frame, label, (pusher_point_img[0][0] - 20, pusher_point_img[0][1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                            cv2.circle(frame, pusher_point_img[0], 5, color)
-
-                            recommended.append([pusher_point_world, pusher_point_normal])
-                        if len(recommended) == 1:
-                            recommended.append(recommended[0])
-                        
-                        bridge_node.publish_recommended_contacts(recommended)
-
-                    # draw target
-                    target_contour = hard_define_contour(TARGET_POSES[name][0], TARGET_POSES[name][1], name)
-                    contour_xyz = target_contour["xyz"]
-                    contour_img = transform_points_world_to_img(contour_xyz, cam_pos, cam_quat, CAMERA_MATRIX)
-                    contour_img = np.array(contour_img)
-                    contour_img.reshape((-1, 1, 2))
-                    contour_img = contour_img[::20]
-                    cv2.polylines(frame,[contour_img],False,color)
-
-            detected_objects = identified_objects.copy()
             # Camera pose is published by external package, we only subscribe to it
-            # Publish all objects including YOLO detections to objects_poses topic
-            bridge_node.publish_object_poses(identified_objects+identified_jenga+yolo_detected_objects)
-            bridge_node.publish_contacts(nearest_pushers)
-            draw_text(frame, cam_pos, cam_quat, identified_objects+identified_jenga, frame_idx, ee_pos, ee_quat)
-            draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_jenga, nearest_pushers)
-            # Create a simple color map using the generic color for all detected colors
-            color_map = {color: GENERIC_COLOR for color in detected_color_points.keys()}
-            draw_color_dot_poses(frame, CAMERA_MATRIX, cam_pos, cam_quat, detected_color_points, color_map)
+            # Publish all YOLO detections to objects_poses topic
+            bridge_node.publish_object_poses(yolo_detected_objects)
+            draw_text(frame, cam_pos, cam_quat, yolo_detected_objects, frame_idx, ee_pos, ee_quat)
+            draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, yolo_detected_objects, [])
 
             # Draw YOLO detections with bounding boxes and axis lines (AFTER all other drawing)
             for detection in detection_metadata:
