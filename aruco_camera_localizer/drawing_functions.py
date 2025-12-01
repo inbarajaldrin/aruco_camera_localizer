@@ -14,13 +14,13 @@ def canonicalize_euler(orientation):
 
 def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat):
     font = cv2.FONT_HERSHEY_SIMPLEX
-    line_height = 20
+    line_height = 18
     x0 = 10
     y = 30
 
     def put_line(text, color=(255, 255, 255)):
         nonlocal y
-        cv2.putText(frame, text, (x0, y), font, 0.6, color, 2)
+        cv2.putText(frame, text, (x0, y), font, 0.55, color, 2)
         y += line_height
 
     # Frame Index

@@ -71,20 +71,22 @@ CAMERA_MATRIX = config.get_camera_matrix()
 
 # YOLO detection settings - only hand detection
 YOLO_PROMPTS = ["hand"]
-YOLO_COLOR_MAP = {
+YOLO_PROMPT_MAP = {
     "hand": "hand"
 }
 
 # Global variables for dynamic YOLO prompt management
 yolo_prompts_lock = threading.Lock()
 current_yolo_prompts = YOLO_PROMPTS.copy()
-current_yolo_color_map = YOLO_COLOR_MAP.copy()
+current_yolo_prompt_map = YOLO_PROMPT_MAP.copy()
 
 # Generic color for all YOLO detections (cyan in BGR)
 GENERIC_COLOR = (255, 255, 0)
 
 
 trackers = {}
+# Store previous frame's objects for position-based matching
+previous_yolo_objects = {}  # color_name -> list of {name, position}
 
 def start_ros_node(camera_topic='/camera/image_raw', depth_topic=None):
     rclpy.init()
@@ -96,16 +98,16 @@ def start_ros_node(camera_topic='/camera/image_raw', depth_topic=None):
 def get_yolo_prompts():
     """Get current YOLO prompts (thread-safe)"""
     with yolo_prompts_lock:
-        return current_yolo_prompts.copy(), current_yolo_color_map.copy()
+        return current_yolo_prompts.copy(), current_yolo_prompt_map.copy()
 
-def update_yolo_prompts(prompts, color_map, yolo_model=None):
-    """Update YOLO prompts and color mapping (thread-safe)"""
+def update_yolo_prompts(prompts, prompt_map, yolo_model=None):
+    """Update YOLO prompts and prompt mapping (thread-safe)"""
     with yolo_prompts_lock:
-        global current_yolo_prompts, current_yolo_color_map
+        global current_yolo_prompts, current_yolo_prompt_map
         current_yolo_prompts = prompts.copy()
-        current_yolo_color_map = color_map.copy()
+        current_yolo_prompt_map = prompt_map.copy()
         print(f"Updated YOLO prompts: {current_yolo_prompts}")
-        print(f"Updated color mapping: {current_yolo_color_map}")
+        print(f"Updated prompt mapping: {current_yolo_prompt_map}")
         
         # Update YOLO model if provided
         if yolo_model is not None:
@@ -119,9 +121,14 @@ def update_yolo_prompts_callback(request, response, yolo_model=None):
     """Service callback for updating YOLO prompts"""
     try:
         prompts = json.loads(request.prompts_json)
-        color_map = json.loads(request.color_map_json) if request.color_map_json else {}
+        # Support both prompt_map_json and color_map_json (for service message compatibility)
+        prompt_map = {}
+        if hasattr(request, 'prompt_map_json') and request.prompt_map_json:
+            prompt_map = json.loads(request.prompt_map_json)
+        elif request.color_map_json:
+            prompt_map = json.loads(request.color_map_json)
         
-        update_yolo_prompts(prompts, color_map, yolo_model)
+        update_yolo_prompts(prompts, prompt_map, yolo_model)
         
         response.success = True
         response.message = f"Updated YOLO prompts to: {prompts}"
@@ -139,9 +146,9 @@ def yolo_prompts_callback(msg, yolo_model=None):
     try:
         data = json.loads(msg.data)
         prompts = data.get('prompts', [])
-        color_map = data.get('color_map', {})
+        prompt_map = data.get('prompt_map', {})
         
-        update_yolo_prompts(prompts, color_map, yolo_model)
+        update_yolo_prompts(prompts, prompt_map, yolo_model)
         print(f"YOLO prompts updated via topic: {prompts}")
         
     except Exception as e:
@@ -164,8 +171,8 @@ def parse_args():
     parser.add_argument("--yolo-prompts", type=str, nargs='+', 
                         default=["hand"],
                         help="YOLO detection prompts (default: hand)")
-    parser.add_argument("--yolo-color-map", type=str, nargs='+',
-                        help="Custom color mapping for prompts (format: prompt1:color1 prompt2:color2)")
+    parser.add_argument("--yolo-prompt-map", type=str, nargs='+',
+                        help="Custom prompt mapping for prompts (format: prompt1:color1 prompt2:color2)")
     # Use parse_known_args to avoid conflicts with ROS args
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -299,7 +306,7 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_color_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -333,7 +340,9 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 
                 # Get class name and map to color
                 class_name = yolo_prompts[class_id] if class_id < len(yolo_prompts) else f"class_{class_id}"
-                color_name = yolo_color_map.get(class_name, class_name)
+                color_name = yolo_prompt_map.get(class_name, class_name)
+                # Replace spaces with underscores in color_name for object naming
+                color_name = color_name.replace(' ', '_')
                 
                 # Calculate center of bounding box
                 x1, y1, x2, y2 = box
@@ -401,18 +410,24 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         orientation_angle, dimensions = contour_result
                 
                 # Store metadata for visualization
+                detection_index = len(detection_metadata)  # Track original detection order
                 detection_metadata.append({
                     'box': box,
                     'score': score,
                     'class_name': class_name,
                     'color_name': color_name,
-                    'orientation_angle': orientation_angle
+                    'orientation_angle': orientation_angle,
+                    'world_point': point_world,  # Store world point for matching
+                    'detection_index': detection_index  # Track original order
                 })
                 
-                # Store by color
+                # Store by color with detection index for matching
                 if color_name not in detected_color_points:
                     detected_color_points[color_name] = []
-                detected_color_points[color_name].append(point_world)
+                detected_color_points[color_name].append({
+                    'point': point_world,
+                    'detection_index': detection_index
+                })
     
     return detected_color_points, detection_metadata
 
@@ -448,10 +463,15 @@ def main():
     def publish_current_prompts():
         """Publish current YOLO prompts for external monitoring"""
         try:
-            prompts, color_map = get_yolo_prompts()
+            prompts, prompt_map = get_yolo_prompts()
+            # Replace spaces with underscores in prompts for topic publishing
+            prompts_normalized = [p.replace(' ', '_') for p in prompts]
+            # Also normalize prompt_map keys and values
+            prompt_map_normalized = {k.replace(' ', '_'): v.replace(' ', '_') if isinstance(v, str) else v 
+                                     for k, v in prompt_map.items()}
             prompts_data = {
-                'prompts': prompts,
-                'color_map': color_map
+                'prompts': prompts_normalized,
+                'prompt_map': prompt_map_normalized
             }
             
             msg = String()
@@ -463,16 +483,16 @@ def main():
     
     prompts_timer = bridge_node.create_timer(1.0, publish_current_prompts)
 
-    # Parse color mapping from command line if provided
-    yolo_color_map = YOLO_COLOR_MAP.copy()
-    if args.yolo_color_map:
-        for mapping in args.yolo_color_map:
+    # Parse prompt mapping from command line if provided
+    yolo_prompt_map = YOLO_PROMPT_MAP.copy()
+    if args.yolo_prompt_map:
+        for mapping in args.yolo_prompt_map:
             if ':' in mapping:
                 prompt, color = mapping.split(':', 1)
-                yolo_color_map[prompt] = color.strip()
+                yolo_prompt_map[prompt] = color.strip()
     
     # Update global variables with command line arguments
-    update_yolo_prompts(args.yolo_prompts, yolo_color_map)
+    update_yolo_prompts(args.yolo_prompts, yolo_prompt_map)
 
     # Initialize YOLO model with dynamic prompts using improved loading
     print(f"YOLO mode: {args.yolo_mode}")
@@ -501,7 +521,7 @@ def main():
         # Set prompts using the combined embeddings
         yolo_model.set_classes(args.yolo_prompts, text_embeddings)
         print(f"✅ YOLO model loaded with prompts: {args.yolo_prompts}")
-        print(f"✅ YOLO color mapping: {yolo_color_map}")
+        print(f"✅ YOLO prompt mapping: {yolo_prompt_map}")
     finally:
         # Restore working directory
         os.chdir(original_cwd)
@@ -560,7 +580,7 @@ def main():
 
             # Check for dynamic YOLO prompt updates
             try:
-                updated_prompts, updated_color_map = get_yolo_prompts()
+                updated_prompts, updated_prompt_map = get_yolo_prompts()
                 # Check if prompts have changed (this will be handled by the global update functions)
                 # The YOLO model will be updated when the prompts actually change
             except Exception as e:
@@ -571,20 +591,23 @@ def main():
             cam_pos, cam_quat = bridge_node.get_camera_pose()
 
             # YOLO Detection Section
-            current_prompts, current_color_map = get_yolo_prompts()
+            current_prompts, current_prompt_map = get_yolo_prompts()
             
             # Get latest depth image if available
             depth_image = bridge_node.get_latest_depth()
             
             detected_color_points, detection_metadata = detect_yolo_blobs(
-                frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat, 
-                current_prompts, current_color_map,
+                frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat,
+                current_prompts, current_prompt_map,
                 OPENCV_TO_CAMERA_QUAT, 
                 distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3
             )
             
             # Convert YOLO detections to object format for objects_poses topic
             yolo_detected_objects = []
+            
+            # Use global variable for previous frame's objects
+            global previous_yolo_objects
             
             # Create a mapping from detection metadata to world points
             # Group metadata by color for easier lookup
@@ -596,34 +619,109 @@ def main():
                 metadata_by_color[color_name].append(metadata)
             
             # Convert YOLO detections to objects (skip pusher colors)
-            for color_name, world_points in detected_color_points.items():
+            # Use position-based matching with previous frame to prevent ID flipping
+            for color_name, world_points_data in detected_color_points.items():
                 # Skip pusher colors
                 if color_name in ["green", "yellow"]:
                     continue
                 
+                # Get previous objects for this color
+                prev_objects = previous_yolo_objects.get(color_name, [])
+                
                 # Get metadata for this color
                 color_metadata = metadata_by_color.get(color_name, [])
                 
-                # Add each detected point as an object
-                for i, point in enumerate(world_points):
+                # Match new detections to previous objects by position
+                # Create list of (point_data, metadata) pairs
+                detection_pairs = []
+                for point_data in world_points_data:
+                    point = point_data['point']
+                    detection_idx = point_data['detection_index']
+                    
+                    # Find corresponding metadata
+                    matching_metadata = None
+                    for metadata in color_metadata:
+                        if metadata.get('detection_index') == detection_idx:
+                            matching_metadata = metadata
+                            break
+                    
+                    if matching_metadata is not None:
+                        detection_pairs.append((point_data, matching_metadata))
+                
+                # Match detections to previous objects by closest position
+                matched_indices = set()
+                object_assignments = {}  # detection_idx -> object_index
+                
+                if prev_objects and len(prev_objects) == len(detection_pairs):
+                    # Match each previous object to closest new detection
+                    for prev_idx, prev_obj in enumerate(prev_objects):
+                        prev_pos = prev_obj['position']
+                        min_dist = float('inf')
+                        best_detection_idx = None
+                        
+                        for point_data, metadata in detection_pairs:
+                            detection_idx = point_data['detection_index']
+                            if detection_idx in matched_indices:
+                                continue
+                            
+                            point = point_data['point']
+                            dist = np.linalg.norm(point - prev_pos)
+                            if dist < min_dist:
+                                min_dist = dist
+                                best_detection_idx = detection_idx
+                        
+                        if best_detection_idx is not None and min_dist < 0.1:  # 10cm threshold
+                            object_assignments[best_detection_idx] = prev_idx
+                            matched_indices.add(best_detection_idx)
+                
+                # Assign remaining detections to new indices
+                next_index = len(prev_objects) if prev_objects else 0
+                for point_data, metadata in detection_pairs:
+                    detection_idx = point_data['detection_index']
+                    if detection_idx not in object_assignments:
+                        object_assignments[detection_idx] = next_index
+                        next_index += 1
+                
+                # Create objects in order of their assigned indices
+                sorted_pairs = sorted(detection_pairs, key=lambda x: object_assignments.get(x[0]['detection_index'], 999))
+                
+                for i, (point_data, metadata) in enumerate(sorted_pairs):
+                    point = point_data['point']
+                    detection_idx = point_data['detection_index']
+                    object_index = object_assignments.get(detection_idx, i)
+                    
                     # Get orientation from detection metadata
                     orientation_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Default identity quaternion
+                    if metadata['orientation_angle'] is not None:
+                        # Convert 2D orientation angle to 3D quaternion
+                        orientation_quat = convert_2d_orientation_to_quaternion(
+                            metadata['orientation_angle'], cam_quat, OPENCV_TO_CAMERA_QUAT
+                        )
                     
-                    # Find corresponding detection metadata for this point
-                    if i < len(color_metadata):
-                        metadata = color_metadata[i]
-                        if metadata['orientation_angle'] is not None:
-                            # Convert 2D orientation angle to 3D quaternion
-                            orientation_quat = convert_2d_orientation_to_quaternion(
-                                metadata['orientation_angle'], cam_quat, OPENCV_TO_CAMERA_QUAT
-                            )
+                    # Store object name in metadata for label display
+                    object_name = f"{color_name}_{object_index}"
+                    metadata['object_name'] = object_name
                     
                     yolo_detected_objects.append({
-                        "name": f"{color_name}_{i}",
+                        "name": object_name,
                         "points": [point],
                         "position": point,
                         "quaternion": orientation_quat,
                         'inferred': False,
+                    })
+            
+            # Update previous objects for next frame
+            previous_yolo_objects = {}
+            for obj in yolo_detected_objects:
+                # Extract color_name and index from object name (e.g., "blue_object_0" -> "blue_object", 0)
+                name_parts = obj["name"].rsplit("_", 1)
+                if len(name_parts) == 2:
+                    color_name = name_parts[0]
+                    if color_name not in previous_yolo_objects:
+                        previous_yolo_objects[color_name] = []
+                    previous_yolo_objects[color_name].append({
+                        "name": obj["name"],
+                        "position": obj["position"]
                     })
             
             # Camera pose is published by external package, we only subscribe to it
@@ -651,13 +749,18 @@ def main():
                 # Draw axis-aligned line with orientation
                 draw_axis_aligned_line(frame, box, orientation_angle)
                 
-                # Draw label with confidence
-                label = f"{class_name}: {score:.2f}"
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(frame, (x1, y1 - label_size[1] - 10), 
+                # Draw label with confidence and ID (replace spaces with underscores for display)
+                # Use object_name if available (includes ID), otherwise use class_name
+                if 'object_name' in detection:
+                    label = f"{detection['object_name']}: {score:.2f}"
+                else:
+                    class_name_display = class_name.replace(' ', '_')
+                    label = f"{class_name_display}: {score:.2f}"
+                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                cv2.rectangle(frame, (x1, y1 - label_size[1] - 8), 
                             (x1 + label_size[0], y1), (0, 255, 0), -1)
-                cv2.putText(frame, label, (x1, y1 - 5), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                cv2.putText(frame, label, (x1, y1 - 4), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
             # Publish the annotated frame (same as what's displayed in OpenCV window)
             bridge_node.publish_annotated_image(frame)
