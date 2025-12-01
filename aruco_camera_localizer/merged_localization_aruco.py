@@ -12,6 +12,9 @@ from aruco_camera_localizer.drawing_functions import draw_text, draw_object_line
 import threading
 import rclpy
 import argparse
+import json
+import os
+from ament_index_python.packages import get_package_share_directory
 
 # Load configuration from YAML
 config = get_config()
@@ -37,7 +40,7 @@ print(f"Calculated fy as {fy}")
 
 CAMERA_MATRIX = config.get_camera_matrix()
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.048  # meters
+MARKER_SIZE = 0.032  # meters
 BLOCK_LENGTH = 0.072 # meters
 BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
@@ -86,6 +89,8 @@ def parse_args():
                         help="ROS2 topic to subscribe for camera images (e.g., /camera/image_raw). If provided, uses ROS topic instead of camera ID.")
     parser.add_argument("--suppress-prints", action='store_true',
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
+    parser.add_argument("--drop", action='store_true',
+                        help="Publish drop poses instead of ArUco poses. Drop poses are calculated from position offsets in aruco_config.json transformed to world frame.")
     return parser.parse_args()
 
 def pick_closest_blob(blobs, last_position):
@@ -101,8 +106,61 @@ def pick_closest_blob(blobs, last_position):
 def match_points(new_blobs, unconfirmed_blobs, confirmed_blobs):
     pass
 
+def load_aruco_config():
+    """Load aruco_config.json and create a mapping from marker_id to row and offset"""
+    # Try to get package share directory, fall back to relative path (same pattern as config_loader)
+    try:
+        pkg_dir = get_package_share_directory("aruco_camera_localizer")
+        config_path = os.path.join(pkg_dir, "config", "aruco_config.json")
+    except:
+        # Fallback for development/testing
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        config_path = os.path.join(pkg_dir, "config", "aruco_config.json")
+    
+    with open(config_path, 'r') as f:
+        aruco_config = json.load(f)
+    
+    # Create mapping: marker_id -> (row_name, offset_dict)
+    marker_to_row = {}
+    for row_name, row_data in aruco_config["marker_rows"].items():
+        marker_ids = row_data["marker_ids"]
+        offset = row_data["position_offset"]
+        for marker_id in marker_ids:
+            marker_to_row[marker_id] = (row_name, offset)
+    
+    return marker_to_row
+
+def transform_offset_marker_to_world(offset_marker, marker_world_pos, marker_world_quat):
+    """
+    Transform an offset from ArUco marker frame to world frame.
+    
+    Args:
+        offset_marker: numpy array [X, Y, Z] in marker frame
+        marker_world_pos: numpy array [x, y, z] marker position in world frame
+        marker_world_quat: numpy array [x, y, z, w] marker orientation in world frame
+    
+    Returns:
+        numpy array [x, y, z] drop position in world frame
+    """
+    # Create rotation from marker quaternion
+    r_marker = R.from_quat(marker_world_quat)
+    
+    # Transform offset from marker frame to world frame
+    offset_world = r_marker.apply(offset_marker)
+    
+    # Add to marker position to get drop position in world frame
+    drop_pos_world = marker_world_pos + offset_world
+    
+    return drop_pos_world
+
 def main():
     args = parse_args()
+    
+    # Load aruco config if --drop mode is enabled
+    marker_to_row = None
+    if args.drop:
+        marker_to_row = load_aruco_config()
+        print(f"Loaded ArUco config for drop mode. Found {len(marker_to_row)} marker mappings.")
     
     # Determine if using ROS topic or camera ID
     use_ros_topic = args.camera_topic is not None
@@ -198,8 +256,46 @@ def main():
 
         detected_objects = identified_objects.copy()
         # Camera pose is published by external package, we only subscribe to it
-        bridge_node.publish_object_poses(identified_objects+identified_aruco)
-        bridge_node.publish_aruco_poses(identified_objects+identified_aruco)
+        
+        # If --drop mode, calculate and publish drop poses instead of aruco poses
+        if args.drop and marker_to_row is not None:
+            drop_poses = []
+            for marker_id in kalman_filters:
+                if marker_stabilities[marker_id]["confirmed"]:
+                    # Check if this marker has a drop pose configuration
+                    if marker_id in marker_to_row:
+                        row_name, offset_dict = marker_to_row[marker_id]
+                        # Get marker world pose
+                        tvec, rvec = kalman_filters[marker_id].predict()
+                        rquat = rvec_to_quat(rvec)
+                        marker_world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
+                        marker_world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
+                        
+                        # Convert offset from dict to numpy array [X, Y, Z]
+                        offset_marker = np.array([offset_dict["X"], offset_dict["Y"], offset_dict["Z"]])
+                        
+                        # Transform offset from marker frame to world frame
+                        drop_pos_world = transform_offset_marker_to_world(
+                            offset_marker, marker_world_pos, marker_world_rot
+                        )
+                        
+                        # Use marker orientation for drop pose (or identity if you prefer)
+                        drop_quat = marker_world_rot
+                        
+                        drop_poses.append({
+                            "name": f"drop_{marker_id}",
+                            "points": [drop_pos_world],
+                            "position": drop_pos_world,
+                            "quaternion": drop_quat,
+                            'inferred': False,
+                        })
+            
+            # Publish drop poses
+            bridge_node.publish_drop_poses(drop_poses)
+        else:
+            # Normal mode: publish ArUco poses
+            bridge_node.publish_object_poses(identified_objects+identified_aruco)
+            bridge_node.publish_aruco_poses(identified_objects+identified_aruco)
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_aruco, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_aruco, [])
 

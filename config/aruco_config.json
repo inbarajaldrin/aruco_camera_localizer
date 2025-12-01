@@ -1,0 +1,30 @@
+{
+  "_comment": "position_offset values are in ArUco marker axis frame of reference",
+  "marker_rows": {
+    "top": {
+      "marker_ids": [1, 4, 7, 10, 13],
+      "position_offset": {
+        "X": 0.0,
+        "Y": -0.15,
+        "Z": 0.15
+      }
+    },
+    "middle": {
+      "marker_ids": [2, 5, 8, 11, 14],
+      "position_offset": {
+        "X": 0.0,
+        "Y": -0.095,
+        "Z": 0.1
+      }
+    },
+    "bottom": {
+      "marker_ids": [3, 6, 9, 12, 15],
+      "position_offset": {
+        "X": 0.0,
+        "Y": -0.025,
+        "Z": 0.05
+      }
+    }
+  }
+}
+

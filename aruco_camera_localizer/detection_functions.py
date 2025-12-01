@@ -166,9 +166,6 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     # Convert from camera frame to world frame
                     marker_pos_world = transform_point_cam_to_world(blended_tvec, cam_pos, cam_quat)
                     marker_quat_world = transform_orientation_cam_to_world(blended_quat, cam_quat)
-                    # Only print on first confirmation
-                    if talk and not was_confirmed:
-                        print(f"[{marker_id}] ArUco marker confirmed: Pos={marker_pos_world}, Quat={marker_quat_world}")
 
 
     for marker_id, kalman in kalman_filters.items():

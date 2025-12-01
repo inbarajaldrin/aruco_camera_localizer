@@ -108,6 +108,7 @@ class LocalizerBridge(Node):
         )
         self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses', qos_profile)
         self.aruco_poses_pub = self.create_publisher(TFMessage, '/aruco_poses', qos_profile)
+        self.drop_poses_pub = self.create_publisher(TFMessage, '/drop_poses', qos_profile)
         
 
     def publish_annotated_image(self, frame):
@@ -259,4 +260,38 @@ class LocalizerBridge(Node):
         
         # Publish the TF message to /aruco_poses
         self.aruco_poses_pub.publish(msg)
+
+    def publish_drop_poses(self, drop_poses_data):
+        """Publish drop poses as TF transforms using TFMessage to /drop_poses topic"""
+        now = self.get_clock().now().to_msg()
+        
+        # Create TFMessage with array of transforms
+        msg = TFMessage()
+        
+        # Add each drop pose as a TransformStamped
+        for drop_pose in drop_poses_data:
+            transform = TransformStamped()
+            transform.header.stamp = now
+            transform.header.frame_id = "base"  # Parent frame
+            transform.child_frame_id = drop_pose["name"]  # Drop pose name (e.g., "drop_3")
+            
+            # Set translation (position)
+            transform.transform.translation = Vector3(
+                x=float(drop_pose["position"][0]),
+                y=float(drop_pose["position"][1]),
+                z=float(drop_pose["position"][2])
+            )
+            
+            # Set rotation (orientation as quaternion)
+            transform.transform.rotation = Quaternion(
+                x=float(drop_pose["quaternion"][0]),
+                y=float(drop_pose["quaternion"][1]),
+                z=float(drop_pose["quaternion"][2]),
+                w=float(drop_pose["quaternion"][3])
+            )
+            
+            msg.transforms.append(transform)
+        
+        # Publish the TF message to /drop_poses
+        self.drop_poses_pub.publish(msg)
 
