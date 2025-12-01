@@ -101,10 +101,9 @@ class LocalizerBridge(Node):
         self.annotated_image_publisher = self.create_publisher(Image, 'camera_annotated', 10)
         self.bridge = CvBridge()
         
-        # Clean approach: Single topic with proper structured data using TFMessage
-        # Use BEST_EFFORT QoS to match ros2 topic echo default
+        # Use RELIABLE QoS
         qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.RELIABLE,
             depth=10
         )
         self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses', qos_profile)
