@@ -83,8 +83,8 @@ robots:
     # Camera parameters
     camera:
       # Camera resolution (pixels)
-      width: 1280
-      height: 720
+      width: 640
+      height: 480
       
       # Field of view (degrees)
       horizontal_fov: 69.4
