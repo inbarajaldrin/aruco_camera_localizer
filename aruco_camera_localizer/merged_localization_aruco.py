@@ -292,6 +292,8 @@ def main():
             
             # Publish drop poses
             bridge_node.publish_drop_poses(drop_poses)
+            # Also publish ArUco poses when in drop mode
+            bridge_node.publish_aruco_poses(identified_objects+identified_aruco)
         else:
             # Normal mode: publish ArUco poses
             bridge_node.publish_object_poses(identified_objects+identified_aruco)
