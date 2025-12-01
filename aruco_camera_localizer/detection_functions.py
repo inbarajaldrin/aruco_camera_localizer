@@ -17,7 +17,8 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
         if ids is not None:
             all_corners.extend(corners)
             all_ids.extend(ids.flatten())
-            # aruco.drawDetectedMarkers(frame, corners, ids)
+            # Draw detected markers on the frame
+            aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
 
 def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, opencv_to_camera_quat, distance=0.132, min_area=120, merge_threshold=0.02):
@@ -83,7 +84,7 @@ def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_qu
     return merged_world_points, image_points
 
 def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
-                  kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, talk=True):
+                  kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, opencv_to_camera_quat, talk=True):
     max_movement = 0.05  # meters
     hold_required = 5    # frames it must persist
     half_size = marker_size / 2
@@ -116,7 +117,20 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
 
             success, rvec, tvec = cv2.solvePnP(object_points, image_points, camera_matrix, dist_coeffs)
             if success:
-                tvec_flat = tvec.flatten()
+                # solvePnP returns pose in OpenCV frame, need to transform to camera frame first
+                tvec_opencv = tvec.flatten()
+                
+                # Step 1: Transform tvec from OpenCV frame to camera frame
+                R_opencv_to_cam = R.from_quat(opencv_to_camera_quat)
+                tvec_cam = R_opencv_to_cam.apply(tvec_opencv)
+                
+                # Step 2: Transform rvec (as quaternion) from OpenCV frame to camera frame
+                quat_opencv = rvec_to_quat(rvec)
+                quat_cam = R_opencv_to_cam * R.from_quat(quat_opencv)
+                quat_cam = quat_cam.as_quat()
+                
+                # Use camera frame values for tracking
+                tvec_flat = tvec_cam
                 distance = np.linalg.norm(tvec_flat - stability["last_tvec"]) if stability["last_tvec"] is not None else 0
                 movement_ok = distance < max_movement
 
@@ -133,7 +147,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     was_confirmed = stability["confirmed"]
                     stability["confirmed"] = True
 
-                    measured_quat = rvec_to_quat(rvec)
+                    measured_quat = quat_cam  # Already in camera frame
                     pred_tvec, pred_rvec = kalman.predict()
                     pred_quat = rvec_to_quat(pred_rvec)
                     blend_factor = 0.99
@@ -141,9 +155,15 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     blended_rvec = quat_to_rvec(blended_quat)
                     blended_tvec = blend_factor * tvec_flat + (1 - blend_factor) * pred_tvec
                     kalman.correct(blended_tvec, blended_rvec)
-                    # cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, blended_rvec, blended_tvec, marker_size * 0.5)
+                    
+                    # Convert back to OpenCV frame for visualization (drawFrameAxes expects OpenCV frame)
+                    R_cam_to_opencv = R.from_quat(opencv_to_camera_quat).inv()
+                    tvec_opencv_viz = R_cam_to_opencv.apply(blended_tvec)
+                    quat_opencv_viz = (R_cam_to_opencv * R.from_quat(blended_quat)).as_quat()
+                    rvec_opencv_viz = quat_to_rvec(quat_opencv_viz)
+                    cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec_opencv_viz, tvec_opencv_viz, marker_size * 0.5)
                     last_seen_frames[marker_id] = current_frame
-                    # Convert to world frame
+                    # Convert from camera frame to world frame
                     marker_pos_world = transform_point_cam_to_world(blended_tvec, cam_pos, cam_quat)
                     marker_quat_world = transform_orientation_cam_to_world(blended_quat, cam_quat)
                     # Only print on first confirmation
@@ -159,8 +179,7 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
 
         if current_frame - last_seen < 15:
             pred_tvec, pred_rvec = kalman.predict()
-            # cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, pred_rvec, pred_tvec, marker_size * 0.5)
-            # Ghost predictions are used internally but not printed to reduce verbosity
+            # Ghost predictions are used internally but not visualized to reduce clutter
         else:
             stability["confirmed"] = False
 

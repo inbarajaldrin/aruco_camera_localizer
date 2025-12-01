@@ -37,7 +37,7 @@ print(f"Calculated fy as {fy}")
 
 CAMERA_MATRIX = config.get_camera_matrix()
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.019  # meters
+MARKER_SIZE = 0.048  # meters
 BLOCK_LENGTH = 0.072 # meters
 BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
@@ -175,7 +175,7 @@ def main():
         # Aruco Section
         corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
         estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
-                    kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, talk)
+                    kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, OPENCV_TO_CAMERA_QUAT, talk)
 
         # After estimating pose, collect marker world positions
         for marker_id in kalman_filters:
