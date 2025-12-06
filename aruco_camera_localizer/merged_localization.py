@@ -65,7 +65,7 @@ previous_yolo_objects = {}  # color_name -> list of {name, box_center, object_in
 previous_frame_gray = None  # Previous grayscale frame for optical flow
 MAX_FRAMES_SINCE_SEEN = 3  # Keep tracking objects for 3 frames after they disappear
 
-def start_ros_node(camera_topic='/camera/image_raw', depth_topic=None):
+def start_ros_node(camera_topic='/camera/image_rgb', depth_topic=None):
     rclpy.init()
     node = LocalizerBridge(camera_topic=camera_topic, depth_topic=depth_topic)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
@@ -133,8 +133,8 @@ def yolo_prompts_callback(msg, yolo_model=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run merged ArUco, YOLOE, and drop pose tracker.")
-    parser.add_argument("--camera-topic", type=str, default="/camera/image_raw",
-                        help="ROS2 topic to subscribe for camera images (default: /camera/image_raw)")
+    parser.add_argument("--camera-topic", type=str, default="/camera/image_rgb",
+                        help="ROS2 topic to subscribe for camera images (default: /camera/image_rgb)")
     parser.add_argument("--depth-topic", type=str, default=None,
                         help="ROS2 topic to subscribe for depth images (optional, uses config distance if not provided)")
     parser.add_argument("--suppress-prints", action='store_true',
@@ -156,6 +156,8 @@ def parse_args():
                         help="YOLO detection prompts (default: hand)")
     parser.add_argument("--yolo-prompt-map", type=str, nargs='+',
                         help="Custom prompt mapping for prompts (format: prompt1:color1 prompt2:color2)")
+    parser.add_argument("--headless", action='store_true',
+                        help="Run without displaying OpenCV window")
     # Use parse_known_args to avoid conflicts with ROS args
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -677,7 +679,10 @@ def main():
     if args.drop:
         print("✓ Drop poses: ENABLED")
     print(f"Waiting for camera frames on {args.camera_topic}...")
-    print("Press 'q' in the OpenCV window to quit.")
+    if not args.headless:
+        print("Press 'q' in the OpenCV window to quit.")
+    else:
+        print("Running in headless mode (no OpenCV window).")
     print("="*60 + "\n")
 
     detected_objects = []
@@ -1024,9 +1029,10 @@ def main():
             # Publish the annotated frame (same as what's displayed in OpenCV window)
             bridge_node.publish_annotated_image(frame)
             
-            cv2.imshow("Merged Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+            if not args.headless:
+                cv2.imshow("Merged Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
                 
     except KeyboardInterrupt:
         print("\nShutting down...")
