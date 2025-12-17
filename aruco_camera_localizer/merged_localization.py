@@ -2,7 +2,6 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 import json
-import os
 import time
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
@@ -57,6 +56,7 @@ BORDER_WIDTH = white_border_mm / 1000.0  # Convert to meters (1.05mm = 0.00105m)
 TOTAL_MARKER_SIZE = MARKER_SIZE - 2 * BORDER_WIDTH  # Actual ArUco pattern size
 ARUCO_DICTS = {
     "DICT_4X4_50": aruco.DICT_4X4_50,
+    "DICT_5X5_50": aruco.DICT_5X5_50,
     # "DICT_5X5_250": aruco.DICT_5X5_250
 }
 
@@ -71,7 +71,7 @@ def load_aruco_annotations(json_file):
     """Load ArUco marker annotations from JSON file"""
     with open(json_file, 'r') as f:
         data = json.load(f)
-    return data['markers']
+    return data['markers'], data.get('aruco_dictionary', 'DICT_4X4_50')
 
 def get_available_models(data_dir):
     """Get list of available models from the data directory"""
@@ -405,9 +405,10 @@ def main():
     
     # Create filter configuration
     filter_config = FilterConfig()
-    
-    bridge_node = start_ros_node(args.image_topic)
-    
+
+    # NOTE: Don't start ROS2 yet - it must be started AFTER camera selection
+    # because select_camera() uses cv2.imshow() which conflicts with ROS2 threading
+
     # Create camera matrix based on mode (sim mode uses image topic)
     use_sim_mode = args.image_topic is not None
     CAMERA_MATRIX = create_camera_matrix(use_sim_mode)
@@ -450,7 +451,7 @@ def main():
         grasp_file = data_dir / "grasp" / f"{model_name}_grasp_points_all_markers.json"
         
         try:
-            aruco_annotations = load_aruco_annotations(aruco_annotations_file)
+            aruco_annotations, aruco_dictionary = load_aruco_annotations(aruco_annotations_file)
             
             # Load wireframe data if available
             wireframe_vertices = None
@@ -475,12 +476,15 @@ def main():
                     if not headless_mode:
                         print(f"Warning: Could not load grasp points for {model_name}: {e}")
             
-            # Create a dictionary mapping marker IDs to their annotations
+            # Create a dictionary mapping (marker_id, dictionary) tuples to their annotations
+            # This allows the same marker ID to exist in multiple models with different dictionaries
             for annotation in aruco_annotations:
                 marker_id = annotation['aruco_id']
-                marker_annotations[marker_id] = {
+                key = (marker_id, aruco_dictionary)
+                marker_annotations[key] = {
                     'annotation': annotation,
-                    'model_name': model_name
+                    'model_name': model_name,
+                    'aruco_dictionary': aruco_dictionary
                 }
             
             model_data[model_name] = {
@@ -518,8 +522,11 @@ def main():
     # Determine input source
     use_ros_topic = args.image_topic is not None
     cap = None
-    
+
     if use_ros_topic:
+        # Start ROS node before waiting for images
+        bridge_node = start_ros_node(args.image_topic)
+
         if not headless_mode:
             print(f"Using ROS image topic: {args.image_topic}")
             print("Waiting for images from ROS topic...")
@@ -532,10 +539,10 @@ def main():
                 break
             time.sleep(0.1)
     else:
-        # Camera mode
+        # Camera mode - select camera BEFORE starting ROS2
         if args.camera_id is not None:
             cam_id = args.camera_id
-        else:        
+        else:
             available = detect_available_cameras()
             if not available:
                 return
@@ -546,6 +553,9 @@ def main():
         cap = cv2.VideoCapture(cam_id)
         if not cap.isOpened():
             return
+
+        # Now start ROS node AFTER camera selection is complete
+        bridge_node = start_ros_node(None)
 
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, c_width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c_height)
@@ -611,8 +621,8 @@ def main():
         just_stopped_moving = not robot_moving and frames_stationary < stationary_settle_time
 
         # Aruco Section - Now using aruco_localizer objects
-        corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
-        estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, TOTAL_MARKER_SIZE,
+        corners, ids, dict_names = detect_markers(frame, gray, ARUCO_DICTS, parameters)
+        estimate_pose(frame, corners, ids, dict_names, CAMERA_MATRIX, DIST_COEFFS, TOTAL_MARKER_SIZE,
                     kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, 
                     filter_config=filter_config, talk=talk, robot_moving=robot_moving)
         
@@ -631,8 +641,21 @@ def main():
         candidate_markers = {}  # {model_name: [(marker_id, object_tvec, object_rvec, quality, distance), ...]}
         
         for marker_id in detected_marker_ids:
-            if marker_id in marker_stabilities and marker_stabilities[marker_id]["confirmed"] and marker_id in marker_annotations:
-                model_name = marker_annotations[marker_id]['model_name']
+            if marker_id in marker_stabilities and marker_stabilities[marker_id]["confirmed"]:
+                # Get the dictionary this marker was detected from
+                detected_dict = marker_stabilities[marker_id].get("aruco_dictionary")
+                
+                if detected_dict is None:
+                    continue
+                
+                # Look up annotation using (marker_id, dictionary) key
+                annotation_key = (marker_id, detected_dict)
+                
+                if annotation_key not in marker_annotations:
+                    # No annotation for this marker_id + dictionary combination
+                    continue
+                
+                model_name = marker_annotations[annotation_key]['model_name']
                 
                 stability = marker_stabilities[marker_id]
                 
@@ -652,7 +675,7 @@ def main():
                     continue
                 
                 # Get object pose from marker pose
-                marker_annotation = marker_annotations[marker_id]['annotation']
+                marker_annotation = marker_annotations[annotation_key]['annotation']
                 try:
                     object_tvec, object_rvec = estimate_object_pose_from_marker(
                         (tvec, rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
@@ -851,22 +874,33 @@ def main():
                                 confirmed_rvec = stability["confirmed_rvec"]
                                 
                                 # Get object pose from confirmed marker pose
-                                if marker_id in marker_annotations:
-                                    marker_annotation = marker_annotations[marker_id]['annotation']
-                                    try:
-                                        object_tvec_cam, object_rvec_cam = estimate_object_pose_from_marker(
-                                            (confirmed_tvec, confirmed_rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
-                                        )
-                                        
-                                        # Convert to world frame
-                                        object_quat_cam = rvec_to_quat(object_rvec_cam)
-                                        object_pos_world = transform_point_cam_to_world(object_tvec_cam, cam_pos, cam_quat)
-                                        object_quat_world = transform_orientation_cam_to_world(object_quat_cam, cam_quat)
-                                        
-                                        use_confirmed_pose = True
-                                    except ValueError:
-                                        # Fall back to last known pose if annotation is invalid
-                                        pass
+                                detected_dict = stability.get("aruco_dictionary")
+                                
+                                if detected_dict is None:
+                                    continue
+                                
+                                # Look up annotation using (marker_id, dictionary) key
+                                annotation_key = (marker_id, detected_dict)
+                                
+                                if annotation_key not in marker_annotations:
+                                    # No annotation for this marker_id + dictionary combination
+                                    continue
+                                
+                                marker_annotation = marker_annotations[annotation_key]['annotation']
+                                try:
+                                    object_tvec_cam, object_rvec_cam = estimate_object_pose_from_marker(
+                                        (confirmed_tvec, confirmed_rvec), marker_annotation, cam_pos=cam_pos, cam_quat=cam_quat
+                                    )
+                                    
+                                    # Convert to world frame
+                                    object_quat_cam = rvec_to_quat(object_rvec_cam)
+                                    object_pos_world = transform_point_cam_to_world(object_tvec_cam, cam_pos, cam_quat)
+                                    object_quat_world = transform_orientation_cam_to_world(object_quat_cam, cam_quat)
+                                    
+                                    use_confirmed_pose = True
+                                except ValueError:
+                                    # Fall back to last known pose if annotation is invalid
+                                    pass
                         
                         if not use_confirmed_pose:
                             # Fall back to last known world pose (no prediction, just freeze it)

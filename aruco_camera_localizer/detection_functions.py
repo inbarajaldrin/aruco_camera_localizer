@@ -10,16 +10,18 @@ from aruco_camera_localizer.object_frame_definitions import define_body_frame_al
 from aruco_camera_localizer.filter_config import FilterConfig
 
 def detect_markers(frame, gray, aruco_dicts, parameters):
-    all_corners, all_ids = [], []
-    for dict_id in aruco_dicts.values():
+    all_corners, all_ids, all_dict_names = [], [], []
+    for dict_name, dict_id in aruco_dicts.items():
         aruco_dict = aruco.getPredefinedDictionary(dict_id)
         detector = aruco.ArucoDetector(aruco_dict, parameters)
         corners, ids, _ = detector.detectMarkers(gray)
         if ids is not None:
-            all_corners.extend(corners)
-            all_ids.extend(ids.flatten())
+            for i, marker_id in enumerate(ids.flatten()):
+                all_corners.append(corners[i])
+                all_ids.append(marker_id)
+                all_dict_names.append(dict_name)
             # aruco.drawDetectedMarkers(frame, corners, ids)
-    return all_corners, all_ids
+    return all_corners, all_ids, all_dict_names
 
 def cleanup_old_markers(kalman_filters, marker_stabilities, last_seen_frames, current_frame, 
                          detected_marker_ids, cleanup_threshold=300, talk=True):
@@ -67,7 +69,7 @@ def cleanup_old_markers(kalman_filters, marker_stabilities, last_seen_frames, cu
     
     return len(markers_to_remove)
 
-def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
+def estimate_pose(frame, corners, ids, dict_names, camera_matrix, dist_coeffs, marker_size,
                   kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, 
                   filter_config=None, talk=True, robot_moving=True):
     # Use default config if not provided
@@ -93,9 +95,9 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
         estimate_pose.debug_counter = 0
     estimate_pose.debug_counter += 1
 
-    if corners and ids:
+    if corners and ids and dict_names:
         
-        for corner, marker_id in zip(corners, ids):
+        for corner, marker_id, dict_name in zip(corners, ids, dict_names):
             marker_id = int(marker_id)
 
             # Initialize tracking state if this is a new marker
@@ -116,9 +118,14 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                     "max_quality_history": filter_config.quality_history_size,  # Maximum number of quality values to track
                     "measurement_history": [],  # Recent measurements for adaptive outlier rejection
                     "max_measurement_history": filter_config.mahalanobis_measurement_history_size,  # Maximum number of measurements to track
-                    "missed_frames": 0  # Track consecutive missed detections
+                    "missed_frames": 0,  # Track consecutive missed detections
+                    "aruco_dictionary": dict_name  # Store which dictionary this marker was detected from
                 }
                 last_seen_frames[marker_id] = 0
+            else:
+                # Update dictionary if it changed (shouldn't happen, but validate)
+                if marker_stabilities[marker_id].get("aruco_dictionary") != dict_name:
+                    marker_stabilities[marker_id]["aruco_dictionary"] = dict_name
 
             kalman = kalman_filters.get(marker_id) if filter_config.enable_kalman_filter else None
             stability = marker_stabilities[marker_id]

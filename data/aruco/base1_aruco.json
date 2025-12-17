@@ -1,0 +1,147 @@
+{
+  "exported_at": "2025-12-14T05:11:00.743882",
+  "model_file": "base1.obj",
+  "total_markers": 4,
+  "aruco_dictionary": "DICT_5X5_50",
+  "size": 0.021,
+  "border_width": 0.05,
+  "cad_object_info": {
+    "center": [
+      0.0,
+      0.0,
+      -5.551115123125783e-17
+    ],
+    "dimensions": {
+      "length": 0.16100000381469726,
+      "width": 0.16100000381469726,
+      "height": 0.03500000000000003
+    },
+    "position": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rotation": {
+      "roll": 0.0,
+      "pitch": 0.0,
+      "yaw": 0.0,
+      "quaternion": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0,
+        "w": 1.0
+      }
+    }
+  },
+  "markers": [
+    {
+      "aruco_id": 0,
+      "face_type": "top",
+      "surface_normal": [
+        0.0,
+        0.0,
+        0.99999999
+      ],
+      "T_object_to_marker": {
+        "position": {
+          "x": -0.07000000190734863,
+          "y": -0.07000000190734863,
+          "z": 0.017500000000000016
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0,
+          "quaternion": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "w": 1.0
+          }
+        }
+      }
+    },
+    {
+      "aruco_id": 1,
+      "face_type": "top",
+      "surface_normal": [
+        0.0,
+        0.0,
+        0.99999999
+      ],
+      "T_object_to_marker": {
+        "position": {
+          "x": -0.07000000190734863,
+          "y": 0.07000000190734863,
+          "z": 0.017500000000000016
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0,
+          "quaternion": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "w": 1.0
+          }
+        }
+      }
+    },
+    {
+      "aruco_id": 2,
+      "face_type": "top",
+      "surface_normal": [
+        0.0,
+        0.0,
+        0.99999999
+      ],
+      "T_object_to_marker": {
+        "position": {
+          "x": 0.07000000190734863,
+          "y": 0.07000000190734863,
+          "z": 0.017500000000000016
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0,
+          "quaternion": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "w": 1.0
+          }
+        }
+      }
+    },
+    {
+      "aruco_id": 3,
+      "face_type": "top",
+      "surface_normal": [
+        0.0,
+        0.0,
+        0.99999999
+      ],
+      "T_object_to_marker": {
+        "position": {
+          "x": 0.07000000190734863,
+          "y": -0.07000000190734863,
+          "z": 0.017500000000000016
+        },
+        "rotation": {
+          "roll": 0.0,
+          "pitch": 0.0,
+          "yaw": 0.0,
+          "quaternion": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0,
+            "w": 1.0
+          }
+        }
+      }
+    }
+  ],
+  "notes": "T_object_to_marker is the complete transform from object center to marker, including full rotation (base + in-plane)."
+}
