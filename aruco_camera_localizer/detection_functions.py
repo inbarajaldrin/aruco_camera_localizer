@@ -101,7 +101,7 @@ def estimate_pose(frame, corners, ids, dict_names, camera_matrix, dist_coeffs, m
             marker_id = int(marker_id)
 
             # Initialize tracking state if this is a new marker
-            if marker_id not in kalman_filters:
+            if marker_id not in marker_stabilities:
                 if filter_config.enable_kalman_filter:
                     kalman_filters[marker_id] = QuaternionKalman()
                 marker_stabilities[marker_id] = {
@@ -148,11 +148,12 @@ def estimate_pose(frame, corners, ids, dict_names, camera_matrix, dist_coeffs, m
                     if talk and estimate_pose.debug_counter % 30 == 0:
                         print(f"[{marker_id}] solvePnP failed")
                     continue
+
             except Exception as e:
                 if talk:
                     print(f"[{marker_id}] solvePnP exception: {e}")
                 continue
-            
+
             # Process successful pose estimation
             try:
                 tvec_flat = tvec.flatten()
