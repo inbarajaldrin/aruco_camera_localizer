@@ -14,13 +14,13 @@ import threading
 class LocalizerBridge(Node):
     def __init__(self, image_topic=None):
         super().__init__('localizer_bridge')
-        # Offset of camera from EE (in EE frame)
-        self.cam_offset_position = np.array([-0.012, -0.036, -0.1]) # meters
+        # Offset of camera from EE (in EE frame, Z points outward from tool flange)
+        self.cam_offset_position = np.array([0.0, 0.0, 0.1]) # 10cm along tool Z
         self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
-        
+
         # --- Latest EE Pose (using values here if no ROS input - Home position) ---
-        self.ee_position = np.array([-0.144, -0.435, 0.202])
-        self.ee_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        self.ee_position = np.array([0.064125, -0.384832, 0.480763])
+        self.ee_quat = np.array([0.0, -1.0, 0.0, 0.0])
         self.lock = threading.Lock()
         self.image_lock = threading.Lock()
         self.latest_frame = None

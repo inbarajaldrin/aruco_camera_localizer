@@ -3,18 +3,32 @@
 Simple ArUco Localizer - Detects markers and displays their pose information
 
 This is a simplified version that:
-- Detects ArUco markers in camera feed
-- Shows marker ID
+- Detects ArUco markers (4x4 and 5x5) in camera feed
+- Shows marker ID and object name (from aruco-grasp-annotator data when available)
 - Displays marker pose (position and orientation)
+- Uses data_path_finder to load object/marker mapping from aruco-grasp-annotator data dir
 """
 
 import cv2
 import numpy as np
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 import argparse
 import threading
+
+# Allow importing aruco_camera_localizer when running from repo (e.g. python utils/aruco_detection.py)
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from aruco_camera_localizer.data_path_finder import find_aruco_data_dir
+    DATA_PATH_FINDER_AVAILABLE = True
+except ImportError:
+    DATA_PATH_FINDER_AVAILABLE = False
+    find_aruco_data_dir = None
 
 # ROS2 imports (optional)
 try:
@@ -27,18 +41,76 @@ except ImportError:
     ROS2_AVAILABLE = False
 
 
+# ArUco dictionary name -> OpenCV dict constant (4x4 and 5x5)
+ARUCO_DICTS = {
+    "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
+    "DICT_5X5_50": cv2.aruco.DICT_5X5_50,
+}
+
+DEFAULT_MARKER_SIZE_M = 0.021  # 21 mm default marker size in meters
+
+
+def _load_marker_registry(data_dir: Path) -> dict:
+    """
+    Load (marker_id, dict_name) -> {object_name, marker_size} from data_dir/aruco/*_aruco.json.
+    Returns a dict keyed by (marker_id, dict_name) with object_name and marker_size.
+    """
+    registry = {}
+    aruco_dir = data_dir / "aruco"
+    if not aruco_dir.exists():
+        return registry
+    for json_path in aruco_dir.glob("*_aruco.json"):
+        try:
+            with open(json_path, "r") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        object_name = json_path.stem.replace("_aruco", "")
+        dict_name = data.get("aruco_dictionary", "DICT_4X4_50")
+        if dict_name not in ARUCO_DICTS:
+            continue
+        for m in data.get("markers", []):
+            mid = m.get("aruco_id")
+            if mid is None:
+                continue
+            registry[(int(mid), dict_name)] = {
+                "object_name": object_name,
+                "marker_size": DEFAULT_MARKER_SIZE_M,
+            }
+    return registry
+
+
 class SimpleArUcoLocalizer:
-    """Simple ArUco marker detector and pose reporter."""
+    """Simple ArUco marker detector and pose reporter (4x4 and 5x5)."""
     
-    def __init__(self, camera_id: int = 0, image_topic: Optional[str] = None):
+    def __init__(self, camera_id: int = 0, image_topic: Optional[str] = None,
+                 dict_names: Optional[list] = None):
         self.camera_id = camera_id
         self.image_topic = image_topic
         self.use_ros2 = image_topic is not None
         
-        # Initialize ArUco detector
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        # Marker registry from data path finder: (marker_id, dict_name) -> {object_name, marker_size}
+        self.marker_registry = {}
+        if DATA_PATH_FINDER_AVAILABLE and find_aruco_data_dir is not None:
+            data_dir = find_aruco_data_dir()
+            if data_dir is not None:
+                self.marker_registry = _load_marker_registry(data_dir)
+                print(f"✅ Loaded marker registry from {data_dir} ({len(self.marker_registry)} entries)")
+            else:
+                print("⚠️  aruco-grasp-annotator data dir not found; object names will be 'Unknown'")
+        else:
+            print("⚠️  data_path_finder not available; object names will be 'Unknown'")
+        
+        # Detectors: use dict_names or all 4x4 and 5x5
         self.aruco_params = cv2.aruco.DetectorParameters()
-        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        names_to_use = dict_names if dict_names else list(ARUCO_DICTS)
+        self.detectors = []
+        for dict_name in names_to_use:
+            if dict_name not in ARUCO_DICTS:
+                continue
+            aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTS[dict_name])
+            detector = cv2.aruco.ArucoDetector(aruco_dict, self.aruco_params)
+            self.detectors.append((dict_name, detector))
         
         # Camera parameters
         self.camera_matrix = None
@@ -50,15 +122,15 @@ class SimpleArUcoLocalizer:
                 raise RuntimeError("ROS2 not available. Install rclpy and cv_bridge to use --image-topic")
             self.bridge = CvBridge()
         
-        print(f"✅ ArUco detector initialized")
+        dict_list = ", ".join(d[0] for d in self.detectors)
+        print(f"✅ ArUco detector initialized ({dict_list})")
     
-    def _get_object_from_marker(self, marker_id: int) -> Optional[str]:
-        """Get object name from detected marker ID."""
-        return None  # No object mapping without data files
-    
-    def _get_marker_size(self, marker_id: int, object_name: str) -> float:
-        """Get marker size - uses default size."""
-        return 0.021  # default marker size in meters
+    def _get_object_and_size(self, marker_id: int, dict_name: str) -> tuple:
+        """Get (object_name, marker_size) for (marker_id, dict_name)."""
+        entry = self.marker_registry.get((marker_id, dict_name))
+        if entry is None:
+            return "Unknown", DEFAULT_MARKER_SIZE_M
+        return entry["object_name"], entry["marker_size"]
     
     def _rotation_matrix_to_euler_angles(self, R: np.ndarray) -> tuple:
         """Convert rotation matrix to Euler angles (roll, pitch, yaw) in radians."""
@@ -119,32 +191,30 @@ class SimpleArUcoLocalizer:
             print(f"⚠️  Failed to load calibration: {e}")
     
     def process_frame(self, frame, show_axes=True, frame_count=0):
-        """Process a single frame for marker detection."""
+        """Process a single frame for marker detection (4x4 and 5x5)."""
         frame_height, frame_width = frame.shape[:2]
         
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, rejected = self.aruco_detector.detectMarkers(gray)
+        # Detect with all dictionaries and collect (corners, id, dict_name)
+        all_corners, all_ids, all_dict_names = [], [], []
+        for dict_name, detector in self.detectors:
+            corners, ids, _ = detector.detectMarkers(gray)
+            if ids is not None:
+                for i, marker_id in enumerate(ids.flatten()):
+                    all_corners.append(corners[i])
+                    all_ids.append(int(marker_id))
+                    all_dict_names.append(dict_name)
         
-        detected_markers = 0
-        
-        if ids is not None and len(ids) > 0:
-            detected_markers = len(ids)
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+        detected_markers = len(all_ids)
+        if all_corners:
+            # Draw all detected markers (corners from all dicts)
+            combined_corners = [c for c in all_corners]
+            combined_ids = np.array(all_ids, dtype=np.int32).reshape(-1, 1)
+            cv2.aruco.drawDetectedMarkers(frame, combined_corners, combined_ids)
             
-            # Process each detected marker
-            for i, marker_id in enumerate(ids.flatten()):
-                # Auto-detect which object this marker belongs to
-                object_name = self._get_object_from_marker(marker_id)
+            for i, (marker_id, dict_name) in enumerate(zip(all_ids, all_dict_names)):
+                object_name, marker_size = self._get_object_and_size(marker_id, dict_name)
                 
-                if object_name is None:
-                    # Unknown marker - still show pose
-                    object_name = "Unknown"
-                    marker_size = 0.021  # default
-                else:
-                    # Get marker size for this object
-                    marker_size = self._get_marker_size(marker_id, object_name)
-                
-                # Estimate marker pose using solvePnP
                 half_size = marker_size / 2
                 obj_points = np.array([
                     [-half_size,  half_size, 0],
@@ -153,51 +223,34 @@ class SimpleArUcoLocalizer:
                     [-half_size, -half_size, 0]
                 ], dtype=np.float32)
                 
-                img_points = corners[i].reshape(4, 2)
+                img_points = all_corners[i].reshape(4, 2)
                 
-                # Solve PnP to get pose
                 success, rvec, tvec = cv2.solvePnP(
-                    obj_points, img_points, 
+                    obj_points, img_points,
                     self.camera_matrix, self.dist_coeffs,
                     flags=cv2.SOLVEPNP_IPPE_SQUARE
                 )
-                
                 if not success:
                     continue
                 
-                # Draw axes if enabled
                 if show_axes:
-                    self._draw_axis(frame, rvec, tvec, length=marker_size/2)
+                    self._draw_axis(frame, rvec, tvec, length=marker_size / 2)
                 
-                # Convert rotation vector to rotation matrix, then to Euler angles
                 R_marker, _ = cv2.Rodrigues(rvec)
                 roll, pitch, yaw = self._rotation_matrix_to_euler_angles(R_marker)
-                
-                # Extract position
                 tvec_flat = tvec.flatten()
-                
-                # Convert to degrees for display
                 roll_deg, pitch_deg, yaw_deg = np.degrees(roll), np.degrees(pitch), np.degrees(yaw)
                 
-                # Display marker information
-                y_offset = 30 + (i * 180)  # Stack multiple markers vertically
-                
-                # Marker ID and Object
-                cv2.putText(frame, f"Marker ID: {marker_id}", (10, y_offset),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                y_offset = 30 + (i * 180)
+                cv2.putText(frame, f"Marker ID: {marker_id} ({dict_name})", (10, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.putText(frame, f"Object: {object_name}", (10, y_offset + 30),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-                
-                # Position
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                 cv2.putText(frame, f"Position (m): X:{tvec_flat[0]:.3f} Y:{tvec_flat[1]:.3f} Z:{tvec_flat[2]:.3f}",
-                          (10, y_offset + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                
-                # Orientation
+                            (10, y_offset + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
                 cv2.putText(frame, f"Orientation (deg): R:{roll_deg:6.1f} P:{pitch_deg:6.1f} Y:{yaw_deg:6.1f}",
-                          (10, y_offset + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                
-                # Print to console as well
-                print(f"Marker ID: {marker_id:2d} | Object: {object_name:20s} | "
+                            (10, y_offset + 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                print(f"Marker ID: {marker_id:2d} ({dict_name:12s}) | Object: {object_name:20s} | "
                       f"Pos: [{tvec_flat[0]:6.3f}, {tvec_flat[1]:6.3f}, {tvec_flat[2]:6.3f}] | "
                       f"Rot: [R:{roll_deg:6.1f} P:{pitch_deg:6.1f} Y:{yaw_deg:6.1f}]")
         
@@ -390,6 +443,8 @@ def main():
     parser.add_argument('--camera', type=int, default=0, help='Camera ID (default: 0)')
     parser.add_argument('--image-topic', type=str, help='ROS2 image topic (e.g., /intel_camera_rgb_sim/image_raw)')
     parser.add_argument('--calibration', type=str, help='Camera calibration JSON file (optional)')
+    parser.add_argument('--dict', dest='aruco_dict', type=str, choices=list(ARUCO_DICTS),
+                        help='Use only this ArUco dictionary (default: both 4x4 and 5x5)')
     args = parser.parse_args()
     
     try:
@@ -400,9 +455,11 @@ def main():
         if args.image_topic and args.camera != 0:
             print("⚠️  Warning: Both --image-topic and --camera specified. Using --image-topic.")
         
+        dict_names = [args.aruco_dict] if getattr(args, 'aruco_dict', None) else None
         localizer = SimpleArUcoLocalizer(
             camera_id=args.camera if not args.image_topic else 0,
-            image_topic=args.image_topic
+            image_topic=args.image_topic,
+            dict_names=dict_names
         )
         
         if args.calibration:
