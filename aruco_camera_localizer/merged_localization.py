@@ -15,7 +15,9 @@ from aruco_camera_localizer.geometric_functions import (
 from aruco_camera_localizer.detection_functions import detect_markers, estimate_poses
 from aruco_camera_localizer.drawing_functions import draw_text, draw_object_lines, draw_grasp_points
 from aruco_camera_localizer.filter_config import FilterConfig
-from aruco_camera_localizer.data_path_finder import find_aruco_data_dir, get_models_by_type
+from aruco_camera_localizer.data_path_finder import (
+    find_aruco_data_dir, get_models_by_type, get_model_subtypes, load_symmetry_data
+)
 import threading
 import rclpy
 import argparse
@@ -220,6 +222,46 @@ def estimate_board_pose_combined(board_corners, board_marker_keys, marker_annota
     return tvec.flatten(), rvec, rms
 
 
+def snap_orientation_to_cardinal(quat_world, snap_angle_deg=90.0, fold_counts=None):
+    """Snap constrained axes by aligning the free axis exactly with world Z.
+
+    Finds which local object axis is most aligned with world Z (table normal),
+    then applies the smallest rotation to make it point exactly along ±world Z.
+    This preserves the yaw (free rotation around table normal) and avoids
+    Euler-angle gimbal lock entirely.
+
+    Args:
+        quat_world: World-frame quaternion [x,y,z,w]
+        snap_angle_deg: (unused in matrix approach, kept for API compat)
+        fold_counts: (unused in matrix approach, kept for API compat)
+    """
+    R_obj = R.from_quat(quat_world).as_matrix()
+
+    # Which local axis is most aligned with world Z?
+    free_axis_idx = np.argmax(np.abs(R_obj[2, :]))
+    v = R_obj[:, free_axis_idx]
+    target = np.array([0.0, 0.0, np.sign(v[2]) if abs(v[2]) > 1e-6 else 1.0])
+
+    # Minimum rotation from v to target (preserves yaw)
+    cross = np.cross(v, target)
+    sin_a = np.linalg.norm(cross)
+    cos_a = np.dot(v, target)
+
+    if sin_a < 1e-10:
+        if cos_a > 0:
+            return quat_world  # already aligned
+        perp = np.array([1.0, 0.0, 0.0]) if abs(v[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        perp = perp - np.dot(perp, v) * v
+        perp /= np.linalg.norm(perp)
+        R_corr = R.from_rotvec(np.pi * perp).as_matrix()
+    else:
+        axis = cross / sin_a
+        angle = np.arctan2(sin_a, cos_a)
+        R_corr = R.from_rotvec(angle * axis).as_matrix()
+
+    return R.from_matrix(R_corr @ R_obj).as_quat()
+
+
 # =============================================================================
 # ARUCO DETECTOR PARAMETERS
 # =============================================================================
@@ -356,6 +398,10 @@ def main():
         if not headless_mode:
             print("No model data loaded successfully")
         return
+
+    # Load fold symmetry and subtype data for orientation snapping
+    model_subtypes = get_model_subtypes(data_dir)
+    symmetry_data = load_symmetry_data(data_dir)
 
     # State tracking
     frame_idx = 0
@@ -546,6 +592,20 @@ def main():
                     yaw = R.from_quat(object_quat_world).as_euler('xyz')[2]
                     object_quat_world = R.from_euler('xyz', [0.0, 0.0, yaw]).as_quat()
                     pose_modified = True
+
+            # Fold symmetry snapping for non-board objects
+            if model_name not in BOARD_MODELS and filter_config.enable_fold_snap:
+                subtype = model_subtypes.get(model_name)
+                if subtype in filter_config.fold_snap_subtypes:
+                    if subtype == 'peg':
+                        fold_counts = symmetry_data.get(model_name)
+                        object_quat_world = snap_orientation_to_cardinal(
+                            object_quat_world, fold_counts=fold_counts)
+                    else:
+                        object_quat_world = snap_orientation_to_cardinal(
+                            object_quat_world, snap_angle_deg=filter_config.block_snap_angle)
+                    pose_modified = True
+
             if filter_config.enable_ema_smoothing and model_name in prev_poses_world:
                 prev_pos, prev_quat = prev_poses_world[model_name]
                 alpha = filter_config.ema_alpha
@@ -590,6 +650,19 @@ def main():
             object_quat_world = transform_orientation_cam_to_world(object_quat, cam_quat)
 
             pose_modified = False
+
+            # Fold symmetry snapping for non-board objects
+            if filter_config.enable_fold_snap:
+                subtype = model_subtypes.get(model_name)
+                if subtype in filter_config.fold_snap_subtypes:
+                    if subtype == 'peg':
+                        fold_counts = symmetry_data.get(model_name)
+                        object_quat_world = snap_orientation_to_cardinal(
+                            object_quat_world, fold_counts=fold_counts)
+                    else:
+                        object_quat_world = snap_orientation_to_cardinal(
+                            object_quat_world, snap_angle_deg=filter_config.block_snap_angle)
+                    pose_modified = True
 
             # --- Optional EMA smoothing ---
             if filter_config.enable_ema_smoothing and model_name in prev_poses_world:

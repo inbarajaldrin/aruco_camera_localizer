@@ -27,6 +27,13 @@ class FilterConfig:
         # Active marker timeout (clear marker if object not seen for N frames)
         self.active_marker_timeout = 60  # frames
 
+        # Fold symmetry snapping for objects on table
+        #   Blocks: snap constrained axes to block_snap_angle (90° for rectangular faces)
+        #   Pegs: snap constrained axes to 360/fold per axis using symmetry data
+        self.enable_fold_snap = True
+        self.fold_snap_subtypes = ['block', 'peg']  # which subtypes get snapping
+        self.block_snap_angle = 90.0  # degrees — blocks always 90° (rectangular faces)
+
         # Euler angle convention: 'intrinsic' (body-frame XYZ)
         #                         'extrinsic' (fixed-frame XYZ)
         self.euler_convention = 'intrinsic'
