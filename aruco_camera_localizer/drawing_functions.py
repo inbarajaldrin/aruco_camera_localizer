@@ -6,7 +6,7 @@ from aruco_camera_localizer.geometric_functions import (
 import numpy as np
 
 
-def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat):
+def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat, euler_convention='intrinsic'):
     font = cv2.FONT_HERSHEY_SIMPLEX
     line_height = 20
     x0 = 10
@@ -19,7 +19,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
 
     put_line(f"Frame: {frame_idx}", (200, 200, 200))
 
-    ee_euler = quat_to_rpy(ee_quat, degrees=True, object_id='end_effector')
+    ee_euler = quat_to_rpy(ee_quat, degrees=True, euler_convention=euler_convention)
     put_line(f"EE xyz: ({1000*ee_pos[0]:.1f}, {1000*ee_pos[1]:.1f}, {1000*ee_pos[2]:.1f}) mm")
     put_line(f"EE rpy: ({ee_euler[0]: 5.1f}, {ee_euler[1]: 5.1f}, {ee_euler[2]: 5.1f}) deg")
 
@@ -30,7 +30,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
         pos = obj["position"]
         quat = obj["quaternion"]
 
-        euler = quat_to_rpy(quat, degrees=True, object_id=name)
+        euler = quat_to_rpy(quat, degrees=True, euler_convention=euler_convention)
         put_line(f"{name} xyz: ({1000*pos[0]:.1f}, {1000*pos[1]:.1f}, {1000*pos[2]:.1f}) mm", (0, 255, 0))
         put_line(f"{name} rpy: ({euler[0]: 5.1f}, {euler[1]: 5.1f}, {euler[2]: 5.1f}) deg", (0, 255, 0))
         y += 5

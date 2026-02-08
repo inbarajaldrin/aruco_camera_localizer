@@ -26,3 +26,7 @@ class FilterConfig:
 
         # Active marker timeout (clear marker if object not seen for N frames)
         self.active_marker_timeout = 60  # frames
+
+        # Euler angle convention: 'intrinsic' (body-frame XYZ)
+        #                         'extrinsic' (fixed-frame XYZ)
+        self.euler_convention = 'intrinsic'

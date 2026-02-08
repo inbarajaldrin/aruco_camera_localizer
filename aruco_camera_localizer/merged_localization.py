@@ -661,7 +661,7 @@ def main():
         # --- Publish and draw ---
         bridge_node.publish_camera_pose(cam_pos, cam_quat)
         bridge_node.publish_object_poses(detected_objects)
-        draw_text(frame, cam_pos, cam_quat, detected_objects, frame_idx, ee_pos, ee_quat)
+        draw_text(frame, cam_pos, cam_quat, detected_objects, frame_idx, ee_pos, ee_quat, euler_convention=filter_config.euler_convention)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, detected_objects, [])
         draw_grasp_points(frame, CAMERA_MATRIX, cam_pos, cam_quat, detected_objects, model_data)
 

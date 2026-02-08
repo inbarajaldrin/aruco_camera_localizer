@@ -1,4 +1,5 @@
 # geometric_function.py
+import warnings
 import cv2
 import scipy.spatial.transform
 from scipy.spatial.transform import Rotation as R
@@ -21,26 +22,24 @@ _rpy_prev_dict = {}
 # Per-object state for quaternion smoothing (reduces noise before RPY conversion)
 _quat_smoothed_dict = {}
 
-def quat_to_rpy(quat, degrees=True, object_id=None, smoothing_alpha=0.75):
+def quat_to_rpy(quat, degrees=True, euler_convention='intrinsic'):
     """
     Convert quaternion [x, y, z, w] to roll, pitch, yaw (RPY).
-    Returns raw RPY values without normalization, smoothing, or unwrapping.
-    
+
     Args:
         quat: Quaternion [x, y, z, w]
         degrees: If True, return angles in degrees; if False, return in radians
-        object_id: Ignored (kept for compatibility)
-        smoothing_alpha: Ignored (kept for compatibility)
-        
+        euler_convention: 'intrinsic' for body-frame XYZ, 'extrinsic' for fixed-frame xyz
+
     Returns:
-        numpy array [roll, pitch, yaw] in the requested units (raw values)
+        numpy array [roll, pitch, yaw] in the requested units
     """
-    # Convert quaternion directly to RPY without any processing
     quat = np.array(quat)
     r = R.from_quat(quat)
-    rpy = r.as_euler('xyz', degrees=degrees)
-    
-    return rpy
+    order = 'XYZ' if euler_convention == 'intrinsic' else 'xyz'
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return r.as_euler(order, degrees=degrees)
 
 def transform_points_world_to_img(points_world, cam_pos_world, cam_quat_world, camera_matrix):
     image_points = []
