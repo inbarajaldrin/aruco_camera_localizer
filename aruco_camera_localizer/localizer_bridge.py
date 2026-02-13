@@ -12,24 +12,31 @@ from aruco_camera_localizer.geometric_functions import quat_to_rpy
 import threading
 
 class LocalizerBridge(Node):
-    def __init__(self, image_topic=None):
+    def __init__(self, image_topic=None, robot_config=None):
         super().__init__('localizer_bridge')
         # Offset of camera from EE (in EE frame, Z points outward from tool flange)
-        self.cam_offset_position = np.array([0.0, 0.0, 0.1]) # 10cm along tool Z
-        self.cam_offset_quat = np.array([0.0, 0.0, 0.0, 1.0]) # identity quaternion
+        self.robot_config = robot_config
+        if robot_config is not None:
+            ee_pose_topic = robot_config.ee_pose_topic
+        else:
+            ee_pose_topic = '/tcp_pose_broadcaster/pose'
 
-        # --- Latest EE Pose (using values here if no ROS input - Home position) ---
-        self.ee_position = np.array([0.064125, -0.384832, 0.480763])
-        self.ee_quat = np.array([0.0, -1.0, 0.0, 0.0])
+        # --- Latest EE Pose ---
+        self.ee_position = None
+        self.ee_quat = None
+        self.ee_pose_received = False
+        self.ee_speed = 0.0  # mm/s
+        self._prev_ee_pos = None
+        self._prev_ee_time = None
         self.lock = threading.Lock()
         self.image_lock = threading.Lock()
         self.latest_frame = None
         self.frame_available = False
         self.use_image_topic = image_topic is not None
-        
+
         self.subscription = self.create_subscription(
             PoseStamped,
-            '/tcp_pose_broadcaster/pose',
+            ee_pose_topic,
             self.ee_pose_callback,
             10)
         self.get_logger().info("TCPSubscriber node started.")
@@ -89,18 +96,41 @@ class LocalizerBridge(Node):
 
     def ee_pose_callback(self, msg: PoseStamped):
         with self.lock:
-            self.ee_position = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+            new_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z])
+            t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if self._prev_ee_pos is not None and self._prev_ee_time is not None:
+                dt = t - self._prev_ee_time
+                if dt > 0:
+                    self.ee_speed = np.linalg.norm(new_pos - self._prev_ee_pos) / dt * 1000.0  # mm/s
+            self._prev_ee_pos = new_pos
+            self._prev_ee_time = t
+            self.ee_position = new_pos
             self.ee_quat = np.array([msg.pose.orientation.x, msg.pose.orientation.y,
                                    msg.pose.orientation.z, msg.pose.orientation.w])
+            if not self.ee_pose_received:
+                self.ee_pose_received = True
+                self.get_logger().info("Received first EE pose from /tcp_pose_broadcaster/pose")
 
     def get_ee_pose(self):
         return self.ee_position, self.ee_quat
 
+    def get_ee_speed(self):
+        with self.lock:
+            return self.ee_speed
+
     def get_camera_pose(self):
         with self.lock:
+            if self.ee_position is None or self.ee_quat is None:
+                return None, None
+            if self.robot_config is not None:
+                offset_pos = np.array(self.robot_config.cam_offset_position)
+                offset_quat = np.array(self.robot_config.cam_offset_quat)
+            else:
+                offset_pos = np.array([0.0, -0.07, 0.0825])
+                offset_quat = np.array([0.0, 0.0, 0.0, 1.0])
             r_ee = R.from_quat(self.ee_quat)
-            r_cam_offset = R.from_quat(self.cam_offset_quat)
-            cam_pos_world = self.ee_position + r_ee.apply(self.cam_offset_position)
+            r_cam_offset = R.from_quat(offset_quat)
+            cam_pos_world = self.ee_position + r_ee.apply(offset_pos)
             cam_quat_world = (r_ee * r_cam_offset).as_quat()
         return cam_pos_world, cam_quat_world
     

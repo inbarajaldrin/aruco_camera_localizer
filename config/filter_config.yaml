@@ -1,0 +1,73 @@
+# ArUco Localizer Filter Configuration
+# Edit this file and restart the node — no rebuild needed
+
+# Z-range validation (rejects markers behind camera or too far)
+z_range_min: 0.05   # meters
+z_range_max: 2.0    # meters
+
+# Maximum reprojection error (pixels) — rejects false/noisy detections
+max_reproj_error: 1.0
+
+# EMA smoothing on output world-frame poses
+enable_ema_smoothing: false
+ema_alpha: 0.5  # 0.0 = full smoothing, 1.0 = no smoothing
+
+# Multi-marker pose mode: 'single' or 'combined'
+board_pose_mode: combined
+object_pose_mode: combined
+
+# Board: constrain to yaw-only (flat on table, no roll/pitch)
+board_yaw_only: true
+
+# Board: snap Z to table_z + object_height/2
+board_snap_z: true
+
+# Object: snap Z to table_z + face_height/2 (picks dimension from resting face)
+object_snap_z: true
+object_snap_z_tolerance: 0.01  # meters — skip Z snap if raw Z is more than this from expected
+
+# Active marker tracking (keep pose in memory for EMA continuity)
+enable_active_marker_tracking: true
+active_marker_timeout: 60  # frames
+
+# Ghost tracking: re-use last pose for brief detection drops
+enable_ghost_tracking: true
+ghost_timeout: 1  # frames
+
+# Fold symmetry snapping for objects on table
+enable_fold_snap: true
+fold_snap_subtypes: ['block', 'peg']
+snap_tilt_threshold: 10.0  # degrees — skip snap if tilt exceeds this
+
+# Pause detection when robot is moving fast
+enable_motion_pause: true
+motion_speed_threshold: 20.0  # mm/s
+motion_pause_holdover: 1  # frames to wait after speed drops before resuming
+
+# IPPE disambiguation: pick the IPPE solution closest to table-resting orientation
+enable_ippe_disambiguation: true
+ippe_reproj_ratio: 1.0  # min worst/best reproj ratio to trust tilt disambiguation
+
+# Wireframe uses raw camera-frame pose (before EMA/snap but after IPPE disambiguation)
+wireframe_raw_pose_boards: false
+wireframe_raw_pose_objects: true
+
+# Wireframe: prefer side-facing marker pose for better perspective overlay
+wireframe_prefer_side_markers: false
+
+# Debug: show all markers/wireframes before filtering (red = rejected, green = accepted)
+debug_show_rejected: false
+
+# Euler angle convention: 'intrinsic' or 'extrinsic'
+euler_convention: extrinsic
+
+# ArUco detector parameters (OpenCV defaults)
+# Tune these to detect more/fewer markers before pose filtering
+detector_adaptive_thresh_win_max: 23  # default 23, try 43 for small markers
+detector_min_perim_rate: 0.03         # default 0.03, try 0.008 for small/far markers
+detector_max_perim_rate: 4.0          # default 4.0, try 0.4 to reject large false positives
+detector_poly_approx_rate: 0.03       # default 0.03
+detector_corner_refine_method: 3      # 0=None, 1=Subpix, 2=Contour, 3=AprilTag
+
+# CLAHE preprocessing (contrast-limited adaptive histogram equalization)
+enable_clahe: false

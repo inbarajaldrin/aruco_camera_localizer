@@ -38,7 +38,7 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat,
 
 def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_objects, nearest_pushers):
     for obj in identified_objects:
-        if obj.get('no_display', False) or obj.get('ghost_tracked', False):
+        if obj.get('no_display', False):
             continue
 
         # Draw axes using the object pose
@@ -70,7 +70,7 @@ def draw_grasp_points(frame, camera_matrix, cam_pos, cam_quat, identified_object
     for obj in identified_objects:
         model_name = obj["name"]
 
-        if obj.get('no_display', False) or obj.get('ghost_tracked', False):
+        if obj.get('no_display', False):
             continue
 
         if model_name not in model_data or model_data[model_name]['grasp_points'] is None:

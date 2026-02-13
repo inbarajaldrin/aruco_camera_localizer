@@ -1,0 +1,28 @@
+# Robot & Camera Configuration
+# Edit this file and restart the node — no rebuild needed
+
+# Camera offset from EE (in EE frame, meters)
+cam_offset_position: [-0.015, -0.037, 0.07]
+cam_offset_quat: [0.0, 0.0, 0.0, 1.0]
+
+# Camera intrinsics
+camera_width: 1280
+camera_height: 720
+camera_hfov: 69.4   # degrees (used only if camera_matrix is not set)
+camera_vfov: 42.5   # degrees (used only if camera_matrix is not set)
+# Calibrated camera matrix [fx, fy, cx, cy] — overrides hfov/vfov computation
+camera_matrix: [910.13, 911.16, 619.57, 349.15]
+distortion_coeffs: [0.130074, -0.439479, -0.001453, -0.000549, 0.369498]
+
+# Camera hardware settings (real camera only)
+# Modes: 'auto' = auto-adjust then lock on startup, 'manual' = use values below
+exposure_mode: auto
+white_balance_mode: auto
+white_balance_temp: 4600.0   # used when white_balance_mode is 'manual'
+exposure: 166.0            # used when exposure_mode is 'manual'
+
+# ROS2 topics
+ee_pose_topic: /tcp_pose_broadcaster/pose
+
+# Table height in robot base frame (meters)
+table_z: -0.08
