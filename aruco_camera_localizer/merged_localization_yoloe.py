@@ -12,7 +12,6 @@ import argparse
 import json
 import os
 from ultralytics import YOLOE
-from max_camera_msgs.srv import UpdateYoloPrompts
 
 # Load configuration from YAML
 config = get_config()
@@ -116,30 +115,6 @@ def update_yolo_prompts(prompts, prompt_map, yolo_model=None):
                 print(f"YOLO model updated with new prompts")
             except Exception as e:
                 print(f"Failed to update YOLO model: {e}")
-
-def update_yolo_prompts_callback(request, response, yolo_model=None):
-    """Service callback for updating YOLO prompts"""
-    try:
-        prompts = json.loads(request.prompts_json)
-        # Support both prompt_map_json and color_map_json (for service message compatibility)
-        prompt_map = {}
-        if hasattr(request, 'prompt_map_json') and request.prompt_map_json:
-            prompt_map = json.loads(request.prompt_map_json)
-        elif request.color_map_json:
-            prompt_map = json.loads(request.color_map_json)
-        
-        update_yolo_prompts(prompts, prompt_map, yolo_model)
-        
-        response.success = True
-        response.message = f"Updated YOLO prompts to: {prompts}"
-        print(f"YOLO prompts updated via service: {prompts}")
-        
-    except Exception as e:
-        response.success = False
-        response.message = f"Failed to update YOLO prompts: {str(e)}"
-        print(f"Failed to update YOLO prompts: {e}")
-        
-    return response
 
 def yolo_prompts_callback(msg, yolo_model=None):
     """Topic callback for real-time YOLO prompt updates"""
@@ -438,16 +413,9 @@ def main():
     # Start ROS node with remaining args
     bridge_node = start_ros_node(camera_topic=args.camera_topic, depth_topic=args.depth_topic)
     
-    # Set up YOLO prompt services and topics
+    # Set up YOLO prompt topics
     from std_msgs.msg import String
-    
-    # Service for updating YOLO prompts
-    update_prompts_service = bridge_node.create_service(
-        UpdateYoloPrompts,
-        '/update_yolo_prompts',
-        update_yolo_prompts_callback
-    )
-    
+
     # Topic subscription for real-time prompt updates
     prompts_subscription = bridge_node.create_subscription(
         String,
@@ -526,23 +494,13 @@ def main():
         # Restore working directory
         os.chdir(original_cwd)
     
-    # Update the service and topic callbacks to use the yolo_model
-    def service_callback_wrapper(request, response):
-        return update_yolo_prompts_callback(request, response, yolo_model)
-    
+    # Update the topic callback to use the yolo_model
     def topic_callback_wrapper(msg):
         return yolo_prompts_callback(msg, yolo_model)
-    
-    # Recreate the service and topic with the wrapped callbacks
-    bridge_node.destroy_service(update_prompts_service)
+
+    # Recreate the topic subscription with the wrapped callback
     bridge_node.destroy_subscription(prompts_subscription)
-    
-    update_prompts_service = bridge_node.create_service(
-        UpdateYoloPrompts,
-        '/update_yolo_prompts',
-        service_callback_wrapper
-    )
-    
+
     prompts_subscription = bridge_node.create_subscription(
         String,
         '/yolo_prompts_update',
@@ -621,10 +579,6 @@ def main():
             # Convert YOLO detections to objects (skip pusher colors)
             # Use position-based matching with previous frame to prevent ID flipping
             for color_name, world_points_data in detected_color_points.items():
-                # Skip pusher colors
-                if color_name in ["green", "yellow"]:
-                    continue
-                
                 # Get previous objects for this color
                 prev_objects = previous_yolo_objects.get(color_name, [])
                 

@@ -34,13 +34,6 @@ def draw_text(frame, cam_pos, cam_quat, object_data, frame_idx, ee_pos, ee_quat)
 
     y += 10  # small gap
 
-    # # Camera Info
-    # cam_euler = R.from_quat(cam_quat).as_euler('xyz', degrees=True)
-    # put_line(f"Camera Pos: x={1000*cam_pos[0]:.1f} mm, y={1000*cam_pos[1]:.1f} mm, z={1000*cam_pos[2]:.1f} mm", (255, 255, 0))
-    # put_line(f"Camera Euler: r={cam_euler[0]: 5.1f} deg, p={cam_euler[1]: 5.1f} deg, y={cam_euler[2]: 5.1f} deg", (255, 255, 0))
-
-    # y += 10  # small gap
-
     # Generic Object Info
     for obj in object_data:
         name = obj["name"]
@@ -99,16 +92,6 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
             if o and z:
                 cv2.arrowedLine(frame, o, z, (255, 0, 0), 2, tipLength=0.3)  # Z: Blue
 
-        # Draw contact points
-        # contact_points = obj["contacts"]
-        # contact_poses = [contact[1] for contact in contact_points]
-        # contact_norms = [contact[2] for contact in contact_points]
-        # contact_axes_start = [contact_pos - 0.02*contact_norm for (contact_pos, contact_norm) in zip(contact_poses, contact_norms)]
-        # contact_poses_img = transform_points_world_to_img(contact_poses, cam_pos, cam_quat, camera_matrix)
-        # contact_axes_img = transform_points_world_to_img(contact_axes_start, cam_pos, cam_quat, camera_matrix)
-        # for pos, ax in zip(contact_poses_img, contact_axes_img):
-        #     cv2.arrowedLine(frame, ax, pos, (255, 255, 255), 2, tipLength=0.3)
-
         # Draw low-res Contour (only if contour data exists)
         if 'contour' in obj and obj['contour'] is not None:
             contour = obj["contour"]
@@ -118,15 +101,6 @@ def draw_object_lines(frame, camera_matrix, cam_pos, cam_quat, identified_object
             contour_img.reshape((-1, 1, 2))
             contour_img = contour_img[::20]
             cv2.polylines(frame,[contour_img],False,color)
-
-        # Draw label with background
-        # label = f"{name}"
-        # (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        # offset = [-40, 40]
-        # cv2.rectangle(frame, (o[0] + offset[0], o[1] - h + offset[1] - 5), 
-        #                      (o[0] + w + offset[0], o[1] + offset[1] + 5), (0, 0, 0), -1)
-        # cv2.putText(frame, label, (o[0] + offset[0], o[1] + offset[1]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-
 
     return frame
 

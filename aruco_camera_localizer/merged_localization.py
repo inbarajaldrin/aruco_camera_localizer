@@ -14,7 +14,6 @@ import argparse
 import json
 import os
 from ultralytics import YOLOE
-from max_camera_msgs.srv import UpdateYoloPrompts
 from ament_index_python.packages import get_package_share_directory
 
 # Load configuration from YAML
@@ -60,10 +59,8 @@ current_yolo_prompt_map = YOLO_PROMPT_MAP.copy()
 # Generic color for all YOLO detections (cyan in BGR)
 GENERIC_COLOR = (255, 255, 0)
 
-# Store previous frame's objects for optical flow-based tracking
-previous_yolo_objects = {}  # color_name -> list of {name, box_center, object_index, frames_since_seen}
-previous_frame_gray = None  # Previous grayscale frame for optical flow
-MAX_FRAMES_SINCE_SEEN = 3  # Keep tracking objects for 3 frames after they disappear
+# Store previous frame's objects for position-based tracking
+previous_yolo_objects = {}  # color_name -> list of {name, position}
 
 def start_ros_node(camera_topic='/camera/image_rgb', depth_topic=None):
     rclpy.init()
@@ -93,30 +90,6 @@ def update_yolo_prompts(prompts, prompt_map, yolo_model=None):
                 print(f"YOLO model updated with new prompts")
             except Exception as e:
                 print(f"Failed to update YOLO model: {e}")
-
-def update_yolo_prompts_callback(request, response, yolo_model=None):
-    """Service callback for updating YOLO prompts"""
-    try:
-        prompts = json.loads(request.prompts_json)
-        # Support both prompt_map_json and color_map_json (for service message compatibility)
-        prompt_map = {}
-        if hasattr(request, 'prompt_map_json') and request.prompt_map_json:
-            prompt_map = json.loads(request.prompt_map_json)
-        elif request.color_map_json:
-            prompt_map = json.loads(request.color_map_json)
-        
-        update_yolo_prompts(prompts, prompt_map, yolo_model)
-        
-        response.success = True
-        response.message = f"Updated YOLO prompts to: {prompts}"
-        print(f"YOLO prompts updated via service: {prompts}")
-        
-    except Exception as e:
-        response.success = False
-        response.message = f"Failed to update YOLO prompts: {str(e)}"
-        print(f"Failed to update YOLO prompts: {e}")
-        
-    return response
 
 def yolo_prompts_callback(msg, yolo_model=None):
     """Topic callback for real-time YOLO prompt updates"""
@@ -311,43 +284,6 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
         else:
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
-
-def track_objects_with_optical_flow(prev_frame_gray, curr_frame_gray, prev_objects, max_pixel_distance=50):
-    """
-    Track objects between frames using Lucas-Kanade optical flow.
-    
-    Args:
-        prev_frame_gray: Previous grayscale frame
-        curr_frame_gray: Current grayscale frame
-        prev_objects: List of previous objects with 'box_center' (x, y) in image coordinates
-        max_pixel_distance: Maximum pixel distance for matching (default: 50 pixels)
-    
-    Returns:
-        Dictionary mapping object_index to predicted (x, y) position in current frame
-    """
-    if prev_frame_gray is None or curr_frame_gray is None or len(prev_objects) == 0:
-        return {}
-    
-    # Prepare points for optical flow (previous frame)
-    prev_points = np.array([[obj['box_center'][0], obj['box_center'][1]] 
-                            for obj in prev_objects], dtype=np.float32).reshape(-1, 1, 2)
-    
-    # Calculate optical flow using Lucas-Kanade
-    lk_params = dict(winSize=(15, 15),
-                     maxLevel=2,
-                     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-    
-    next_points, status, error = cv2.calcOpticalFlowPyrLK(
-        prev_frame_gray, curr_frame_gray, prev_points, None, **lk_params
-    )
-    
-    # Create mapping from object_index to predicted position
-    tracked_positions = {}
-    for i, obj in enumerate(prev_objects):
-        if status[i][0] == 1:  # Successfully tracked
-            tracked_positions[obj['object_index']] = tuple(next_points[i][0])
-    
-    return tracked_positions
 
 def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3):
     """Detect objects using YOLO and convert to world points, grouped by color"""
@@ -546,16 +482,9 @@ def main():
     # Initialize YOLO model if YOLOE is enabled
     yolo_model = None
     if args.yoloe:
-        # Set up YOLO prompt services and topics
+        # Set up YOLO prompt topics
         from std_msgs.msg import String
-        
-        # Service for updating YOLO prompts
-        update_prompts_service = bridge_node.create_service(
-            UpdateYoloPrompts,
-            '/update_yolo_prompts',
-            update_yolo_prompts_callback
-        )
-        
+
         # Topic subscription for real-time prompt updates
         prompts_subscription = bridge_node.create_subscription(
             String,
@@ -634,23 +563,13 @@ def main():
             # Restore working directory
             os.chdir(original_cwd)
         
-        # Update the service and topic callbacks to use the yolo_model
-        def service_callback_wrapper(request, response):
-            return update_yolo_prompts_callback(request, response, yolo_model)
-        
+        # Update the topic callback to use the yolo_model
         def topic_callback_wrapper(msg):
             return yolo_prompts_callback(msg, yolo_model)
-        
-        # Recreate the service and topic with the wrapped callbacks
-        bridge_node.destroy_service(update_prompts_service)
+
+        # Recreate the topic subscription with the wrapped callback
         bridge_node.destroy_subscription(prompts_subscription)
-        
-        update_prompts_service = bridge_node.create_service(
-            UpdateYoloPrompts,
-            '/update_yolo_prompts',
-            service_callback_wrapper
-        )
-        
+
         prompts_subscription = bridge_node.create_subscription(
             String,
             '/yolo_prompts_update',
@@ -752,7 +671,7 @@ def main():
                 # Convert YOLO detections to object format for objects_poses topic
                 # Use global variable for previous frame's objects
                 global previous_yolo_objects
-                
+
                 # Create a mapping from detection metadata to world points
                 # Group metadata by color for easier lookup
                 metadata_by_color = {}
@@ -761,113 +680,85 @@ def main():
                     if color_name not in metadata_by_color:
                         metadata_by_color[color_name] = []
                     metadata_by_color[color_name].append(metadata)
-                
-                # Convert YOLO detections to objects (skip pusher colors)
-                # Use optical flow-based tracking to maintain stable IDs
-                global previous_frame_gray
-                
-                # Convert current frame to grayscale for optical flow
-                current_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                
+
+                # Convert YOLO detections to objects
+                # Use position-based matching with previous frame to prevent ID flipping
                 for color_name, world_points_data in detected_color_points.items():
-                    # Skip pusher colors
-                    if color_name in ["green", "yellow"]:
-                        continue
-                    
                     # Get previous objects for this color
                     prev_objects = previous_yolo_objects.get(color_name, [])
-                    
+
                     # Get metadata for this color
                     color_metadata = metadata_by_color.get(color_name, [])
-                    
-                    # Create list of (point_data, metadata) pairs with image coordinates
+
+                    # Match new detections to previous objects by position
+                    # Create list of (point_data, metadata) pairs
                     detection_pairs = []
                     for point_data in world_points_data:
                         point = point_data['point']
                         detection_idx = point_data['detection_index']
-                        
+
                         # Find corresponding metadata
                         matching_metadata = None
                         for metadata in color_metadata:
                             if metadata.get('detection_index') == detection_idx:
                                 matching_metadata = metadata
                                 break
-                        
+
                         if matching_metadata is not None:
-                            # Calculate bounding box center in image coordinates
-                            box = matching_metadata['box']
-                            center_x = (box[0] + box[2]) / 2
-                            center_y = (box[1] + box[3]) / 2
-                            matching_metadata['box_center'] = (center_x, center_y)
                             detection_pairs.append((point_data, matching_metadata))
-                    
-                    # Track previous objects using optical flow
-                    tracked_positions = {}
-                    if previous_frame_gray is not None and len(prev_objects) > 0:
-                        tracked_positions = track_objects_with_optical_flow(
-                            previous_frame_gray, current_frame_gray, prev_objects
-                        )
-                    
-                    # Match new detections to tracked positions using greedy matching
+
+                    # Match detections to previous objects by closest position
                     matched_indices = set()
-                    matched_detections = set()
                     object_assignments = {}  # detection_idx -> object_index
-                    max_pixel_distance = 50  # Maximum pixel distance for matching
-                    
-                    # Create list of all possible matches with distances
-                    match_candidates = []
-                    for point_data, metadata in detection_pairs:
-                        detection_idx = point_data['detection_index']
-                        detection_center = metadata['box_center']
-                        
-                        for obj_index, tracked_pos in tracked_positions.items():
-                            dist = np.linalg.norm(np.array(detection_center) - np.array(tracked_pos))
-                            if dist < max_pixel_distance:
-                                match_candidates.append((dist, detection_idx, obj_index))
-                    
-                    # Sort by distance and match greedily (best matches first)
-                    match_candidates.sort(key=lambda x: x[0])
-                    
-                    for dist, detection_idx, obj_index in match_candidates:
-                        if detection_idx not in matched_detections and obj_index not in matched_indices:
-                            object_assignments[detection_idx] = obj_index
-                            matched_indices.add(obj_index)
-                            matched_detections.add(detection_idx)
-                    
+
+                    if prev_objects and len(prev_objects) == len(detection_pairs):
+                        for prev_idx, prev_obj in enumerate(prev_objects):
+                            prev_pos = prev_obj['position']
+                            min_dist = float('inf')
+                            best_detection_idx = None
+
+                            for point_data, metadata in detection_pairs:
+                                detection_idx = point_data['detection_index']
+                                if detection_idx in matched_indices:
+                                    continue
+
+                                point = point_data['point']
+                                dist = np.linalg.norm(point - prev_pos)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_detection_idx = detection_idx
+
+                            if best_detection_idx is not None and min_dist < 0.1:  # 10cm threshold
+                                object_assignments[best_detection_idx] = prev_idx
+                                matched_indices.add(best_detection_idx)
+
                     # Assign remaining detections to new indices
-                    # Find the maximum existing object index for this color
-                    max_existing_index = -1
-                    for obj in prev_objects:
-                        if obj['object_index'] > max_existing_index:
-                            max_existing_index = obj['object_index']
-                    
-                    next_index = max_existing_index + 1
+                    next_index = len(prev_objects) if prev_objects else 0
                     for point_data, metadata in detection_pairs:
                         detection_idx = point_data['detection_index']
                         if detection_idx not in object_assignments:
                             object_assignments[detection_idx] = next_index
                             next_index += 1
-                    
+
                     # Create objects in order of their assigned indices
                     sorted_pairs = sorted(detection_pairs, key=lambda x: object_assignments.get(x[0]['detection_index'], 999))
-                    
+
                     for i, (point_data, metadata) in enumerate(sorted_pairs):
                         point = point_data['point']
                         detection_idx = point_data['detection_index']
                         object_index = object_assignments.get(detection_idx, i)
-                        
+
                         # Get orientation from detection metadata
                         orientation_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Default identity quaternion
                         if metadata['orientation_angle'] is not None:
-                            # Convert 2D orientation angle to 3D quaternion
                             orientation_quat = convert_2d_orientation_to_quaternion(
                                 metadata['orientation_angle'], cam_quat, OPENCV_TO_CAMERA_QUAT
                             )
-                        
+
                         # Store object name in metadata for label display
                         object_name = f"{color_name}_{object_index}"
                         metadata['object_name'] = object_name
-                        
+
                         yolo_detected_objects.append({
                             "name": object_name,
                             "points": [point],
@@ -875,74 +766,19 @@ def main():
                             "quaternion": orientation_quat,
                             'inferred': False,
                         })
-                
-                # Update previous objects for next frame (store image coordinates)
-                # Create a set of (color_name, object_index) pairs that were detected this frame
-                detected_this_frame = set()
+
+                # Update previous objects for next frame
+                previous_yolo_objects = {}
                 for obj in yolo_detected_objects:
                     name_parts = obj["name"].rsplit("_", 1)
                     if len(name_parts) == 2:
                         color_name = name_parts[0]
-                        object_index = int(name_parts[1])
-                        detected_this_frame.add((color_name, object_index))
-                
-                # First, increment frames_since_seen for all existing objects
-                # and reset counter for objects detected this frame
-                for color_name in previous_yolo_objects:
-                    for obj in previous_yolo_objects[color_name]:
-                        if (color_name, obj['object_index']) in detected_this_frame:
-                            obj['frames_since_seen'] = 0  # Reset counter
-                        else:
-                            obj['frames_since_seen'] = obj.get('frames_since_seen', 0) + 1
-                
-                # Update or add objects that were detected this frame
-                for obj in yolo_detected_objects:
-                    # Extract color_name and index from object name (e.g., "blue_0" -> "blue", 0)
-                    name_parts = obj["name"].rsplit("_", 1)
-                    if len(name_parts) == 2:
-                        color_name = name_parts[0]
-                        object_index = int(name_parts[1])
-                        
-                        # Find corresponding metadata to get box_center
-                        box_center = None
-                        for metadata in detection_metadata:
-                            if metadata.get('object_name') == obj["name"]:
-                                box_center = metadata.get('box_center')
-                                break
-                        
-                        if box_center is not None:
-                            if color_name not in previous_yolo_objects:
-                                previous_yolo_objects[color_name] = []
-                            
-                            # Update existing object or add new one
-                            found = False
-                            for prev_obj in previous_yolo_objects[color_name]:
-                                if prev_obj['object_index'] == object_index:
-                                    prev_obj['box_center'] = box_center
-                                    prev_obj['frames_since_seen'] = 0  # Reset counter
-                                    prev_obj['name'] = obj["name"]
-                                    found = True
-                                    break
-                            
-                            if not found:
-                                previous_yolo_objects[color_name].append({
-                                    "name": obj["name"],
-                                    "box_center": box_center,
-                                    "object_index": object_index,
-                                    "frames_since_seen": 0
-                                })
-                
-                # Remove objects that haven't been seen for too long
-                for color_name in list(previous_yolo_objects.keys()):
-                    previous_yolo_objects[color_name] = [
-                        obj for obj in previous_yolo_objects[color_name]
-                        if obj.get('frames_since_seen', 0) < MAX_FRAMES_SINCE_SEEN
-                    ]
-                    if len(previous_yolo_objects[color_name]) == 0:
-                        del previous_yolo_objects[color_name]
-                
-                # Update previous frame for next iteration
-                previous_frame_gray = current_frame_gray.copy()
+                        if color_name not in previous_yolo_objects:
+                            previous_yolo_objects[color_name] = []
+                        previous_yolo_objects[color_name].append({
+                            "name": obj["name"],
+                            "position": obj["position"]
+                        })
 
             # Combine all detected objects for drawing (aruco + yoloe)
             all_objects = identified_aruco + yolo_detected_objects

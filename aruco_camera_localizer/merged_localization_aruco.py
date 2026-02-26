@@ -49,29 +49,6 @@ ARUCO_DICTS = {
     # "DICT_5X5_250": aruco.DICT_5X5_250
 }
 
-# Dynamic Color Range Configuration
-# Add or remove color ranges here - the rest of the code will automatically adjust
-COLOR_RANGES = {
-    "blue": [np.array([100, 80, 80]), np.array([140, 255, 255])],
-    "red": [np.array([170, 80, 80]), np.array([180, 255, 255])],
-    "green": [np.array([35, 80, 100]), np.array([75, 255, 255])],
-    "yellow": [np.array([15, 80, 60]), np.array([35, 255, 255])],
-    # Add more colors here as needed:
-    # "purple": [np.array([130, 80, 80]), np.array([160, 255, 255])],
-    # "orange": [np.array([10, 80, 80]), np.array([25, 255, 255])],
-    # "pink": [np.array([160, 80, 80]), np.array([180, 255, 255])],
-}
-
-# Color visualization settings (BGR format for OpenCV)
-COLOR_VISUALIZATION = {
-    "blue": (255, 0, 0),      # Blue in BGR
-    "red": (0, 0, 255),       # Red in BGR  
-    "green": (0, 255, 0),     # Green in BGR
-    "yellow": (0, 255, 255),  # Yellow in BGR
-    # Add corresponding visualization colors for new ranges
-}
-
-
 trackers = {}
 
 def start_ros_node(camera_topic='/camera/image_raw'):
@@ -103,8 +80,6 @@ def pick_closest_blob(blobs, last_position):
     closest_idx = np.argmin(distances)
     return blobs[closest_idx]
 
-def match_points(new_blobs, unconfirmed_blobs, confirmed_blobs):
-    pass
 
 def load_aruco_config():
     """Load aruco_config.json and create a mapping from marker_id to row and offset"""

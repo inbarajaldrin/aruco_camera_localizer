@@ -236,19 +236,6 @@ def get_curve(mesh, ax_geom=None, ax_curv=None):
     x_smooth, y_smooth = resampled_spline[:, 0], resampled_spline[:, 1]
     normals = compute_normals(tck, u_equal, resampled)
 
-    # Verify total length and segment length agree
-    # print(total_length)
-    # coords = np.stack((x_smooth, y_smooth), axis=1)
-    # segment_lengths = np.linalg.norm(np.diff(coords, axis=0), axis=1)
-
-    # plt.figure()
-    # plt.plot(segment_lengths, '.-')
-    # plt.title("Distance Between Consecutive Points")
-    # plt.xlabel("Segment Index")
-    # plt.ylabel("Length")
-    # plt.grid(True)
-    # plt.show()
-
     arrow_dx = x_smooth[1] - x_smooth[0]
     arrow_dy = y_smooth[1] - y_smooth[0]
 

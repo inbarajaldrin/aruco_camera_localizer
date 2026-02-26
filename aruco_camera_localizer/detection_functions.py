@@ -1,12 +1,9 @@
 import cv2
 import cv2.aruco as aruco
 import numpy as np
-from itertools import combinations
 from scipy.spatial.transform import Rotation as R
-from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world
+from aruco_camera_localizer.geometric_functions import rvec_to_quat, transform_orientation_cam_to_world, transform_point_cam_to_world, slerp_quat, quat_to_rvec
 from aruco_camera_localizer.kalman_functions import QuaternionKalman
-from aruco_camera_localizer.geometric_functions import transform_points_world_to_img, slerp_quat, quat_to_rvec, complete_triangle, pick_best_candidate
-from aruco_camera_localizer.object_frame_definitions import define_body_frame_allen_key, define_body_frame_wrench
 
 def detect_markers(frame, gray, aruco_dicts, parameters):
     all_corners, all_ids = [], []
@@ -20,68 +17,6 @@ def detect_markers(frame, gray, aruco_dicts, parameters):
             # Draw detected markers on the frame
             aruco.drawDetectedMarkers(frame, corners, ids)
     return all_corners, all_ids
-
-def detect_color_blobs(frame, color_range, color, camera_matrix, cam_pos, cam_quat, opencv_to_camera_quat, distance=0.132, min_area=120, merge_threshold=0.02):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Define blue range in HSV
-    mask = cv2.inRange(hsv, color_range[0], color_range[1])
-    kernel = np.ones((15, 15), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    world_points = []
-    image_points = []
-
-    if contours:
-        for cnt in contours:
-            M = cv2.moments(cnt)
-            area = cv2.contourArea(cnt)            
-            if area < min_area:
-                continue  # skip tiny blobs
-            if M["m00"] > 0:
-                cv2.drawContours(frame, [cnt], 0, (255, 255, 255), 1)
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-
-                # Step 1: Ray in OpenCV frame
-                pixel = np.array([cx, cy, 1.0])
-                ray_opencv = np.linalg.inv(camera_matrix) @ pixel
-
-                # Step 2: Transform from OpenCV frame to camera frame
-                R_opencv_to_cam = R.from_quat(opencv_to_camera_quat)
-                ray_cam = R_opencv_to_cam.apply(ray_opencv)
-
-                # Step 3: Transform ray to world frame
-                R_wc = R.from_quat(cam_quat).as_matrix()
-                ray_world = R_wc @ ray_cam
-                cam_origin_world = np.array(cam_pos)
-
-                # Step 4: Place object at fixed distance along ray
-                ray_normalized = ray_world / np.linalg.norm(ray_world)
-                point_world = cam_origin_world + ray_normalized * distance
-                world_points.append(point_world)
-
-    # Step 4: Merge nearby points in world frame
-    merged_world_points = []
-    used = set()
-    for i, pt in enumerate(world_points):
-        if i in used:
-            continue
-        cluster = [pt]
-        used.add(i)
-        for j in range(i + 1, len(world_points)):
-            if j in used:
-                continue
-            if np.linalg.norm(world_points[j] - pt) < merge_threshold:
-                cluster.append(world_points[j])
-                used.add(j)
-        cluster_avg = np.mean(cluster, axis=0)
-        merged_world_points.append(cluster_avg)
-    image_points = transform_points_world_to_img(merged_world_points, cam_pos, cam_quat, camera_matrix)
-    for (u,v) in image_points:
-        cv2.circle(frame, (u, v), 5, color, -1)
-    return merged_world_points, image_points
 
 def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
                   kalman_filters, marker_stabilities, last_seen_frames, current_frame, cam_pos, cam_quat, opencv_to_camera_quat, talk=True):
@@ -180,84 +115,3 @@ def estimate_pose(frame, corners, ids, camera_matrix, dist_coeffs, marker_size,
         else:
             stability["confirmed"] = False
 
-def detect_object(p1, p2, p3, name, inferred):
-    if name == "allen_key":
-        pos, quat, contacts, contour = define_body_frame_allen_key(p1, p2, p3)
-    elif name == "wrench":
-        pos, quat, contacts, contour = define_body_frame_wrench(p1, p2, p3)
-    obj = {
-        "name": name,
-        "points": (p1, p2, p3),
-        "position": pos,
-        "quaternion": quat,
-        'inferred': inferred,
-        "contacts": contacts,
-        "contour": contour
-    }
-    return obj
-
-def identify_objects_from_blobs(world_points, object_dicts, tolerance=10.0):
-    identified_objects = []
-
-    for tri_pts in combinations(world_points, 3):
-        p1, p2, p3 = np.array(tri_pts[0]), np.array(tri_pts[1]), np.array(tri_pts[2])
-        sides = sorted([
-            1000 * np.linalg.norm(p1 - p2),
-            1000 * np.linalg.norm(p2 - p3),
-            1000 * np.linalg.norm(p3 - p1)
-        ])
-
-        for name, template in object_dicts.items():
-            expected = sorted(template)
-            diffs = [abs(a - b) for a, b in zip(sides, expected)]
-            if all(d < tolerance for d in diffs):
-                identified_objects.append(detect_object(p1, p2, p3, name, False))
-                break  # One match per triangle
-
-    return identified_objects
-
-def attempt_recovery_for_missing_objects(last_objects, current_points, known_triangles, merge_threshold=0.03):
-    recovered = []
-
-    for prev in last_objects:
-        name = prev["name"]
-        prev_pts = prev["points"]
-        matched_pts = []
-        unmatched_prev_pt = None
-
-        # Find current points close to previous ones
-        for prev_pt in prev_pts:
-            found = False
-            for cur_pt in current_points:
-                if np.linalg.norm(prev_pt - cur_pt) < merge_threshold:
-                    matched_pts.append((prev_pt, cur_pt))
-                    found = True
-                    break
-            if not found:
-                unmatched_prev_pt = prev_pt
-        if len(matched_pts) < 2:
-            continue  # not enough info to infer
-
-        # If more than two points matched, pick best two (closest to original positions)
-        if len(matched_pts) > 2:
-            matched_pts.sort(key=lambda pair: np.linalg.norm(pair[0] - pair[1]))
-            unmatched_prev_pt = matched_pts[2][0]
-            matched_pts = matched_pts[:2]
-
-        if len(matched_pts) == 2:
-            cur_pts = [pair[1] for pair in matched_pts]
-
-            side_lengths = known_triangles[name]
-            candidates = complete_triangle(cur_pts[0], cur_pts[1], side_lengths)
-            if candidates:
-                inferred_p3 = pick_best_candidate(candidates, unmatched_prev_pt)
-            else:
-                inferred_p3 = None
-            # print("INFERRED", inferred_p3)
-
-            # for inferred_p3 in candidates:
-            try:
-                recovered.append(detect_object(cur_pts[0], cur_pts[1], inferred_p3, name, True))
-            except:
-                continue
-    return recovered
