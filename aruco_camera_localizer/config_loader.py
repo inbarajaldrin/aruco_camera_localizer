@@ -113,6 +113,36 @@ class RobotConfig:
         offset = self._config['transforms']['calibration_offset']
         return offset['x'], offset['y'], offset['z']
 
+    # ========== Filter & Tracking Configuration ==========
+    # These delegate to the standalone filter_config.yaml via get_filter_config().
+
+    def get_z_range(self):
+        fc = get_filter_config()
+        return fc.get('z_range_min', 0.05), fc.get('z_range_max', 2.0)
+
+    def get_stability_params(self):
+        fc = get_filter_config()
+        return (fc.get('max_movement', 0.05),
+                fc.get('hold_required', 5),
+                fc.get('ghost_timeout', 15))
+
+    def get_kalman_process_noise(self):
+        fc = get_filter_config()
+        return {k: fc.get(k, d) for k, d in [
+            ('q_pos_xy', 1e-8), ('q_pos_z', 1e-4), ('q_quat', 1e-2),
+            ('q_velocity', 1e-2), ('q_acceleration', 1e-1),
+            ('q_multiplier_moving', 10.0), ('q_multiplier_static', 0.1),
+        ]}
+
+    def get_kalman_measurement_noise(self):
+        fc = get_filter_config()
+        return {k: fc.get(k, d) for k, d in [
+            ('r_pos_xy', 1e-4), ('r_pos_z', 5e-1), ('r_quat', 1e-2),
+        ]}
+
+    def get_blend_factor(self):
+        return get_filter_config().get('blend_factor', 0.99)
+
 
 # Singleton instance for easy access
 _config_instance = None
@@ -123,4 +153,33 @@ def get_config():
     if _config_instance is None:
         _config_instance = RobotConfig()
     return _config_instance
+
+
+# ============================================================================
+# Filter config — loaded from config/filter_config.yaml (separate from robot)
+# ============================================================================
+_filter_config_instance = None
+
+def get_filter_config():
+    """Load filter_config.yaml once and return it as a flat dict."""
+    global _filter_config_instance
+    if _filter_config_instance is not None:
+        return _filter_config_instance
+
+    try:
+        pkg_dir = get_package_share_directory("aruco_camera_localizer")
+        path = os.path.join(pkg_dir, "config", "filter_config.yaml")
+    except Exception:
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(pkg_dir, "config", "filter_config.yaml")
+
+    try:
+        with open(path, 'r') as f:
+            _filter_config_instance = yaml.safe_load(f) or {}
+        print(f"Loaded filter config from {path}")
+    except FileNotFoundError:
+        print(f"filter_config.yaml not found at {path}, using defaults")
+        _filter_config_instance = {}
+
+    return _filter_config_instance
 

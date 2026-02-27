@@ -581,9 +581,17 @@ def main():
     kalman_filters = {}
     marker_stabilities = {}
     last_seen_frames = {}
+    prev_rvecs = {}
     parameters = None
     if args.aruco:
         parameters = aruco.DetectorParameters()
+
+    # Load filter tuning from robot_config.yaml
+    z_range_min, z_range_max = config.get_z_range()
+    max_movement, hold_required, ghost_timeout = config.get_stability_params()
+    q_params = config.get_kalman_process_noise()
+    r_params = config.get_kalman_measurement_noise()
+    blend_factor = config.get_blend_factor()
 
     frame_idx = 0
     talk = not args.suppress_prints
@@ -631,7 +639,10 @@ def main():
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 corners, ids = detect_markers(frame, gray, ARUCO_DICTS, parameters)
                 estimate_pose(frame, corners, ids, CAMERA_MATRIX, DIST_COEFFS, MARKER_SIZE,
-                            kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, OPENCV_TO_CAMERA_QUAT, talk)
+                            kalman_filters, marker_stabilities, last_seen_frames, frame_idx, cam_pos, cam_quat, OPENCV_TO_CAMERA_QUAT, talk,
+                            prev_rvecs=prev_rvecs, z_range_min=z_range_min, z_range_max=z_range_max,
+                            max_movement=max_movement, hold_required=hold_required, ghost_timeout=ghost_timeout,
+                            blend_factor=blend_factor, q_params=q_params, r_params=r_params)
 
                 # After estimating pose, collect marker world positions
                 for marker_id in kalman_filters:

@@ -1,0 +1,36 @@
+# =============================================================================
+# Filter & Tracking Configuration — ArUco Camera Localizer
+# =============================================================================
+# Tune these values to match your camera setup and tracking requirements.
+# All distances in meters, angles in degrees unless noted.
+
+# --- Pose Estimation (IPPE) ---
+z_range_min: 0.05          # Min valid marker depth (m)
+z_range_max: 2.0           # Max valid marker depth (m)
+
+# --- Stability Gate ---
+max_movement: 0.05         # Max frame-to-frame translation jump (m)
+hold_required: 5           # Consecutive stable frames before confirmed
+ghost_timeout: 15          # Frames before unconfirmed marker is dropped
+
+# --- Kalman Process Noise (Q) ---
+# Lower = smoother / more inertia.  Higher = faster response / noisier.
+q_pos_xy: 1.0e-8           # X, Y position (very stable laterally)
+q_pos_z: 1.0e-4            # Z position (monocular depth is noisier)
+q_quat: 1.0e-2             # Quaternion orientation
+q_velocity: 1.0e-2         # Velocity states
+q_acceleration: 1.0e-1     # Acceleration states (most uncertain)
+
+# Adaptive Q multipliers — scale entire Q matrix based on robot state
+q_multiplier_moving: 10.0  # When robot arm is moving
+q_multiplier_static: 0.1   # When robot arm is stationary
+
+# --- Kalman Measurement Noise (R) ---
+# Lower = more trust in raw measurement.
+r_pos_xy: 1.0e-4           # X, Y lateral (high trust)
+r_pos_z: 5.0e-1            # Z depth (very noisy for monocular)
+r_quat: 1.0e-2             # Quaternion orientation
+
+# --- Blending ---
+# Measurement vs Kalman prediction weight. 1.0 = fully trust measurement.
+blend_factor: 0.99

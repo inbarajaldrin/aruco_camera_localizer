@@ -63,9 +63,10 @@ robots:
       
       # Calibration offsets for fine-tuning object positions (meters)
       calibration_offset:
-        x: 0.004  # 4mm correction in x 
-        y: 0.002  # 2mm correction in y 
+        x: 0.004  # 4mm correction in x
+        y: 0.002  # 2mm correction in y
         z: 0.0    # Z adjustment
+
   # --------------------------------------------------------------------------
   # Robosort Robot Configuration
   # --------------------------------------------------------------------------
