@@ -119,6 +119,6 @@ robots:
       
       # Calibration offsets for fine-tuning object positions (meters)
       calibration_offset:
-        x: -0.02  # Adjust X position
-        y: 0.0  # Adjust Y position
-        z: -0.02  # Adjust Z position
+        x: 0.0
+        y: 0.0
+        z: 0.0

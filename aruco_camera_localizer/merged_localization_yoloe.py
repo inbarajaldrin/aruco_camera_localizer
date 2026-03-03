@@ -148,6 +148,8 @@ def parse_args():
                         help="YOLO detection prompts (default: hand)")
     parser.add_argument("--yolo-prompt-map", type=str, nargs='+',
                         help="Custom prompt mapping for prompts (format: prompt1:color1 prompt2:color2)")
+    parser.add_argument("--headless", action='store_true',
+                        help="Run without GUI window (no cv2.imshow). Annotated frames still published to /annotated_image.")
     # Use parse_known_args to avoid conflicts with ROS args
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -174,44 +176,68 @@ def extract_object_roi(image, box):
     roi = image[y1:y2, x1:x2]
     return roi, (x1, y1)
 
-def find_orientation_pca(roi):
-    """Find object orientation using Principal Component Analysis"""
+def find_centroid_and_orientation_moments(roi, mask_roi=None):
+    """Find object centroid and orientation using cv2.moments on filled mask.
+
+    Uses image moments (area-weighted) which is mathematically equivalent to
+    PCA on all filled pixels, but more robust than PCA on contour boundary
+    points (which suffers from non-uniform boundary sampling bias).
+
+    Args:
+        roi: BGR image crop of the bounding box
+        mask_roi: Optional binary mask from segmentation model (same size as roi)
+
+    Returns:
+        (centroid_x, centroid_y, angle, elongation) in ROI coordinates, or None
+    """
     try:
-        # Convert to grayscale
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold to get binary image
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+        if mask_roi is not None and mask_roi.any():
+            binary = mask_roi.astype(np.uint8) * 255
+        else:
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Use largest connected component only (avoids centroid landing in
+        # empty space between disconnected mask fragments)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         if not contours:
             return None
-        
-        # Get the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Get contour points
-        points = largest_contour.reshape(-1, 2)
-        
-        if len(points) < 3:
+        largest = max(contours, key=cv2.contourArea)
+        component_mask = np.zeros_like(binary)
+        cv2.drawContours(component_mask, [largest], -1, 255, -1)
+
+        M = cv2.moments(component_mask, binaryImage=True)
+        if M['m00'] < 1.0:
             return None
-        
-        # Apply PCA
-        pca = PCA(n_components=2)
-        pca.fit(points)
-        
-        # Get the first principal component (direction of maximum variance)
-        principal_axis = pca.components_[0]
-        
-        # Calculate angle from the principal axis
-        angle = np.arctan2(principal_axis[1], principal_axis[0])
-        
-        return angle, pca.explained_variance_ratio_[0]
-        
-    except Exception as e:
+
+        cx = M['m10'] / M['m00']
+        cy = M['m01'] / M['m00']
+
+        # Orientation from central moments (equivalent to PCA on filled pixels)
+        mu20 = M['mu20'] / M['m00']
+        mu11 = M['mu11'] / M['m00']
+        mu02 = M['mu02'] / M['m00']
+        theta = 0.5 * np.arctan2(2 * mu11, mu20 - mu02)
+
+        # Elongation ratio (eigenvalue ratio of covariance matrix)
+        common = np.sqrt((mu20 - mu02)**2 + 4 * mu11**2)
+        lambda1 = 0.5 * (mu20 + mu02 + common)
+        lambda2 = max(0.5 * (mu20 + mu02 - common), 1e-10)
+        elongation = lambda1 / lambda2
+
+        return cx, cy, theta, elongation
+
+    except Exception:
         return None
+
+
+def find_orientation_pca(roi):
+    """Find object orientation (legacy wrapper, now uses moments)"""
+    result = find_centroid_and_orientation_moments(roi)
+    if result is not None:
+        _, _, angle, elongation = result
+        return angle, elongation
+    return None
 
 def find_orientation_contour(roi):
     """Find object orientation using contour analysis (minAreaRect)"""
@@ -289,11 +315,16 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
     # Run YOLO detection
     results = yolo_model.predict(frame, verbose=False, conf=conf_threshold)
     
+    # Extract segmentation masks if available
+    seg_masks = None
+    if results[0].masks is not None:
+        seg_masks = results[0].masks.data.cpu().numpy()  # (N, H, W) binary masks
+
     if results[0].boxes is not None and len(results[0].boxes) > 0:
         boxes_raw = results[0].boxes.xyxy.cpu().numpy()
         scores_raw = results[0].boxes.conf.cpu().numpy()
         class_ids_raw = results[0].boxes.cls.cpu().numpy().astype(int)
-        
+
         # Apply NMS
         boxes_nms = []
         for box in boxes_raw:
@@ -301,89 +332,94 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
             w = x2 - x1
             h = y2 - y1
             boxes_nms.append([x1, y1, w, h])
-        
+
         indices = cv2.dnn.NMSBoxes(boxes_nms, scores_raw.tolist(), conf_threshold, nms_threshold)
-        
+
         if len(indices) > 0:
             indices = indices.flatten()
-            
+
             # Process each detection
             for idx in indices:
                 box = boxes_raw[idx]
                 score = scores_raw[idx]
                 class_id = int(class_ids_raw[idx])
-                
+
                 # Get class name and map to color
                 class_name = yolo_prompts[class_id] if class_id < len(yolo_prompts) else f"class_{class_id}"
                 color_name = yolo_prompt_map.get(class_name, class_name)
                 # Replace spaces with underscores in color_name for object naming
                 color_name = color_name.replace(' ', '_')
-                
-                # Calculate center of bounding box
+
                 x1, y1, x2, y2 = box
-                center_x = (x1 + x2) / 2
-                center_y = (y1 + y2) / 2
-                
-                # Extract depth value at center if depth image is available
+                bx1, by1, bx2, by2 = int(x1), int(y1), int(x2), int(y2)
+
+                # Extract seg mask for this detection (if available)
+                mask_roi = None
+                if seg_masks is not None and idx < len(seg_masks):
+                    full_mask = seg_masks[idx]
+                    if full_mask.shape != (frame.shape[0], frame.shape[1]):
+                        full_mask = cv2.resize(full_mask, (frame.shape[1], frame.shape[0]),
+                                               interpolation=cv2.INTER_NEAREST)
+                    mask_roi = full_mask[by1:by2, bx1:bx2] > 0.5
+
+                # Centroid + orientation from image moments on filled mask
+                roi, roi_offset = extract_object_roi(frame, box)
+                moments_result = find_centroid_and_orientation_moments(roi, mask_roi)
+                if moments_result is not None:
+                    cx_roi, cy_roi, orientation_angle, elongation = moments_result
+                    # Convert ROI-local centroid to full-image pixel coordinates
+                    center_x = bx1 + cx_roi
+                    center_y = by1 + cy_roi
+                else:
+                    # Fallback to bbox center
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    orientation_angle = None
+
+                # Extract depth from bounding box region (not just center pixel)
                 actual_distance = distance  # Default to config distance
                 if depth_image is not None:
-                    center_x_int = int(center_x)
-                    center_y_int = int(center_y)
-                    
-                    if (0 <= center_x_int < depth_image.shape[1] and 
-                        0 <= center_y_int < depth_image.shape[0]):
-                        depth_raw = depth_image[center_y_int, center_x_int]
-                        
-                        # Handle different depth formats
-                        if depth_raw > 0:
-                            # Isaac Sim typically uses meters (float32), regular depth uses mm (uint16)
+                    # Sample the inner 60% of the bounding box to avoid edge pixels
+                    bw = bx2 - bx1
+                    bh = by2 - by1
+                    margin_x = int(bw * 0.2)
+                    margin_y = int(bh * 0.2)
+                    roi_x1 = max(0, bx1 + margin_x)
+                    roi_y1 = max(0, by1 + margin_y)
+                    roi_x2 = min(depth_image.shape[1], bx2 - margin_x)
+                    roi_y2 = min(depth_image.shape[0], by2 - margin_y)
+
+                    if roi_x2 > roi_x1 and roi_y2 > roi_y1:
+                        depth_roi = depth_image[roi_y1:roi_y2, roi_x1:roi_x2].flatten()
+                        # Keep only finite, positive values
+                        valid = depth_roi[np.isfinite(depth_roi) & (depth_roi > 0)]
+                        if len(valid) > 0:
                             if depth_image.dtype == np.float32:
-                                actual_distance = depth_raw  # Already in meters
+                                actual_distance = float(np.median(valid))
                             else:
-                                actual_distance = depth_raw / 1000.0  # Convert mm to meters
-                        else:
-                            # Invalid depth value, use config distance
-                            pass
-                
+                                actual_distance = float(np.median(valid)) / 1000.0
+
                 # Step 1: Ray in OpenCV frame
                 pixel = np.array([center_x, center_y, 1.0])
                 ray_opencv = np.linalg.inv(camera_matrix) @ pixel
-                
+
                 # Step 2: Transform from OpenCV frame to camera frame
                 R_opencv_to_cam = R.from_quat(opencv_to_camera_quat)
                 ray_cam = R_opencv_to_cam.apply(ray_opencv)
-                
+
                 # Step 3: Transform ray to world frame
                 R_wc = R.from_quat(cam_quat).as_matrix()
                 ray_world = R_wc @ ray_cam
                 cam_origin_world = np.array(cam_pos)
-                
+
                 # Step 4: Place object at actual distance along ray
                 ray_normalized = ray_world / np.linalg.norm(ray_world)
                 point_world = cam_origin_world + ray_normalized * actual_distance
-                
+
                 # Step 5: Apply calibration offset to object position
                 if bridge_node is not None:
                     point_world = bridge_node.apply_calibration_offset(point_world)
-                
-                
-                # Extract ROI for orientation analysis
-                roi, roi_offset = extract_object_roi(frame, box)
-                
-                # Try to find object orientation
-                orientation_angle = None
-                
-                # Method 1: Try PCA analysis
-                pca_result = find_orientation_pca(roi)
-                if pca_result is not None:
-                    orientation_angle, variance_ratio = pca_result
-                
-                # Method 2: Try contour analysis if PCA failed
-                if orientation_angle is None:
-                    contour_result = find_orientation_contour(roi)
-                    if contour_result is not None:
-                        orientation_angle, dimensions = contour_result
-                
+
                 # Store metadata for visualization
                 detection_index = len(detection_metadata)  # Track original detection order
                 detection_metadata.append({
@@ -395,7 +431,7 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                     'world_point': point_world,  # Store world point for matching
                     'detection_index': detection_index  # Track original order
                 })
-                
+
                 # Store by color with detection index for matching
                 if color_name not in detected_color_points:
                     detected_color_points[color_name] = []
@@ -520,7 +556,8 @@ def main():
     print("="*60)
     print(f"Waiting for camera frames on {args.camera_topic}...")
     print("Make sure the camera_publisher node is running!")
-    print("Press 'q' in the OpenCV window to quit.")
+    if not args.headless:
+        print("Press 'q' in the OpenCV window to quit.")
     print("="*60 + "\n")
 
     detected_objects = []
@@ -718,15 +755,17 @@ def main():
 
             # Publish the annotated frame (same as what's displayed in OpenCV window)
             bridge_node.publish_annotated_image(frame)
-            
-            cv2.imshow("YOLO-based Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+
+            if not args.headless:
+                cv2.imshow("YOLO-based Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
                 
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        cv2.destroyAllWindows()
+        if not args.headless:
+            cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
