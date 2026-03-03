@@ -379,27 +379,34 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 # Extract depth from bounding box region (not just center pixel)
                 actual_distance = distance  # Default to config distance
                 if depth_image is not None:
-                    # Sample the inner 60% of the bounding box to avoid edge pixels
-                    bw = bx2 - bx1
-                    bh = by2 - by1
-                    margin_x = int(bw * 0.2)
-                    margin_y = int(bh * 0.2)
-                    roi_x1 = max(0, bx1 + margin_x)
-                    roi_y1 = max(0, by1 + margin_y)
-                    roi_x2 = min(depth_image.shape[1], bx2 - margin_x)
-                    roi_y2 = min(depth_image.shape[0], by2 - margin_y)
+                    if mask_roi is not None and mask_roi.any():
+                        # Sample depth only at segmentation mask pixels (actual object surface)
+                        depth_bbox = depth_image[by1:by2, bx1:bx2]
+                        masked_depth = depth_bbox[mask_roi].flatten()
+                        valid = masked_depth[np.isfinite(masked_depth) & (masked_depth > 0)]
+                    else:
+                        # Fallback: inner 60% of bbox (no seg mask available)
+                        bw = bx2 - bx1
+                        bh = by2 - by1
+                        margin_x = int(bw * 0.2)
+                        margin_y = int(bh * 0.2)
+                        roi_x1 = max(0, bx1 + margin_x)
+                        roi_y1 = max(0, by1 + margin_y)
+                        roi_x2 = min(depth_image.shape[1], bx2 - margin_x)
+                        roi_y2 = min(depth_image.shape[0], by2 - margin_y)
+                        if roi_x2 > roi_x1 and roi_y2 > roi_y1:
+                            depth_roi = depth_image[roi_y1:roi_y2, roi_x1:roi_x2].flatten()
+                            valid = depth_roi[np.isfinite(depth_roi) & (depth_roi > 0)]
+                        else:
+                            valid = np.array([])
 
-                    if roi_x2 > roi_x1 and roi_y2 > roi_y1:
-                        depth_roi = depth_image[roi_y1:roi_y2, roi_x1:roi_x2].flatten()
-                        # Keep only finite, positive values
-                        valid = depth_roi[np.isfinite(depth_roi) & (depth_roi > 0)]
-                        if len(valid) > 0:
-                            if depth_image.dtype == np.float32:
-                                actual_distance = float(np.median(valid))
-                            else:
-                                actual_distance = float(np.median(valid)) / 1000.0
+                    if len(valid) > 0:
+                        if depth_image.dtype == np.float32:
+                            actual_distance = float(np.median(valid))
+                        else:
+                            actual_distance = float(np.median(valid)) / 1000.0
 
-                # Step 1: Ray in OpenCV frame
+                # Step 1: Ray direction in OpenCV frame (Z=1 at unit depth)
                 pixel = np.array([center_x, center_y, 1.0])
                 ray_opencv = np.linalg.inv(camera_matrix) @ pixel
 
@@ -515,17 +522,30 @@ def main():
     os.chdir(script_dir)
     
     try:
+        import hashlib
+        import torch
+
         yolo_model = YOLOE(model_path)
-        print(f"✅ Loaded YOLOE model from {model_path}")
-        
-        # Pre-compute text embeddings for all prompts
-        print("Pre-computing text embeddings...")
-        text_embeddings = yolo_model.get_text_pe(args.yolo_prompts)
-        
-        # Set prompts using the combined embeddings
+        print(f"Loaded YOLOE model from {model_path}")
+
+        # Cache text embeddings to disk keyed by prompt hash
+        prompt_key = hashlib.md5(",".join(sorted(args.yolo_prompts)).encode()).hexdigest()[:12]
+        cache_path = os.path.join(script_dir, f".text_embeddings_{prompt_key}.pt")
+
+        if os.path.exists(cache_path):
+            print(f"Loading cached text embeddings from {cache_path}")
+            cache = torch.load(cache_path, weights_only=True)
+            text_embeddings = cache["embeddings"]
+            print(f"Loaded cached embeddings for prompts: {cache['prompts']}")
+        else:
+            print("Computing text embeddings (first time, ~90s for CLIP model download)...")
+            text_embeddings = yolo_model.get_text_pe(args.yolo_prompts)
+            torch.save({"prompts": args.yolo_prompts, "embeddings": text_embeddings}, cache_path)
+            print(f"Cached text embeddings to {cache_path}")
+
         yolo_model.set_classes(args.yolo_prompts, text_embeddings)
-        print(f"✅ YOLO model loaded with prompts: {args.yolo_prompts}")
-        print(f"✅ YOLO prompt mapping: {yolo_prompt_map}")
+        print(f"YOLO model ready with prompts: {args.yolo_prompts}")
+        print(f"YOLO prompt mapping: {yolo_prompt_map}")
     finally:
         # Restore working directory
         os.chdir(original_cwd)
