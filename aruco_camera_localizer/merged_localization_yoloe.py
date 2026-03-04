@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from scipy.optimize import minimize
 from sklearn.decomposition import PCA
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.config_loader import get_config
@@ -478,43 +479,52 @@ def _fit_cuboid_obb(points_3d):
         return None
 
 
-def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
-                          cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
-                          color=(0, 255, 255), thickness=2):
-    """Draw a 3D oriented bounding box wireframe projected onto the image.
+def _project_cuboid_corners(center, quat, dims, cam_pos, cam_quat,
+                             camera_matrix, opencv_to_camera_quat):
+    """Project 8 cuboid corners to 2D image pixels.
 
-    Projection chain (inverse of detection ray chain):
-    world → camera frame (inv cam_quat) → OpenCV frame (inv opencv_to_camera) → image (K)
+    Projection chain: world → camera frame → OpenCV frame → image (K).
+
+    Returns:
+        (8, 2) float64 array of (u, v) pixel coords, or None if any corner is behind camera.
     """
-    # Build 8 corners of the OBB: ±half along each axis
-    half = cuboid_dimensions / 2.0
+    half = np.asarray(dims, dtype=np.float64) / 2.0
     signs = np.array([
         [-1, -1, -1], [-1, -1,  1], [-1,  1, -1], [-1,  1,  1],
         [ 1, -1, -1], [ 1, -1,  1], [ 1,  1, -1], [ 1,  1,  1],
     ], dtype=np.float64)
     local_corners = signs * half  # (8, 3)
 
-    # Rotate to world frame and translate to centroid
-    rot = R.from_quat(cuboid_quaternion).as_matrix()
-    world_corners = (rot @ local_corners.T).T + cuboid_center  # (8, 3)
+    rot = R.from_quat(quat).as_matrix()
+    world_corners = (rot @ local_corners.T).T + np.asarray(center, dtype=np.float64)
 
-    # World → camera frame
     R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
-    cam_origin = np.array(cam_pos, dtype=np.float64)
-    cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T  # (8, 3)
+    cam_origin = np.asarray(cam_pos, dtype=np.float64)
+    cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T
 
-    # Camera frame → OpenCV frame
     R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
-    opencv_corners = (R_c2o @ cam_corners.T).T  # (8, 3)
+    opencv_corners = (R_c2o @ cam_corners.T).T
 
-    # Project to image: u = fx * X/Z + cx, v = fy * Y/Z + cy
     z_vals = opencv_corners[:, 2]
     if np.any(z_vals <= 0.01):
-        return  # Some corners behind camera
+        return None
 
-    us = (camera_matrix[0, 0] * opencv_corners[:, 0] / z_vals + camera_matrix[0, 2]).astype(int)
-    vs = (camera_matrix[1, 1] * opencv_corners[:, 1] / z_vals + camera_matrix[1, 2]).astype(int)
-    pts_2d = list(zip(us, vs))
+    us = camera_matrix[0, 0] * opencv_corners[:, 0] / z_vals + camera_matrix[0, 2]
+    vs = camera_matrix[1, 1] * opencv_corners[:, 1] / z_vals + camera_matrix[1, 2]
+    return np.column_stack([us, vs])  # (8, 2) float64
+
+
+def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                          cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
+                          color=(0, 255, 255), thickness=2):
+    """Draw a 3D oriented bounding box wireframe projected onto the image."""
+    pts_2d = _project_cuboid_corners(cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                                     cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat)
+    if pts_2d is None:
+        return
+
+    pts_int = pts_2d.astype(int)
+    pts_list = list(map(tuple, pts_int))
 
     # 12 edges of a cuboid
     edges = [
@@ -523,7 +533,201 @@ def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimens
         (0, 4), (1, 5), (2, 6), (3, 7),  # along axis 0
     ]
     for i, j in edges:
-        cv2.line(image, pts_2d[i], pts_2d[j], color, thickness)
+        cv2.line(image, pts_list[i], pts_list[j], color, thickness)
+
+
+def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
+                                 opencv_to_camera_quat, cam_quat, cam_pos,
+                                 table_z, known_height=None,
+                                 bbox=None):
+    """Fit 3D cuboid by maximizing IoU between projected silhouette and seg mask.
+
+    Instead of relying on depth data and PCA (which misaligns with object edges),
+    this optimizes the 3D cuboid pose so its 2D projection best matches the
+    segmentation mask — an analysis-by-synthesis approach.
+
+    Args:
+        mask_roi: Binary mask (H, W) of the detected object within its bbox.
+        bx1, by1: Top-left corner of bbox in full image coords.
+        camera_matrix: 3x3 intrinsic matrix K.
+        opencv_to_camera_quat: [x,y,z,w] quaternion from OpenCV to camera frame.
+        cam_quat: [x,y,z,w] camera quaternion in world frame.
+        cam_pos: [x,y,z] camera position in world frame.
+        table_z: Known Z height of the table plane in world frame.
+        known_height: Object height in meters (default 0.011 for lego bricks).
+        bbox: (x1, y1, x2, y2) YOLOE detection bbox for containment constraint.
+
+    Returns:
+        (center, quaternion, dimensions) or None on failure.
+    """
+    try:
+        h = known_height if known_height is not None else 0.011
+
+        # --- Initialize from back-projected minAreaRect ---
+        rect_result = _backproject_rect_to_table(
+            mask_roi, bx1, by1, camera_matrix,
+            opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+        if rect_result is None:
+            return None
+
+        centroid_3d, yaw0 = rect_result
+
+        # Get initial width/length from the back-projected corners
+        binary = (mask_roi > 0.5).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        largest = max(contours, key=cv2.contourArea)
+        rect = cv2.minAreaRect(largest)
+        corners_roi = cv2.boxPoints(rect).astype(np.float64)
+
+        # Back-project corners to table to get real-world edge lengths
+        corners_img = corners_roi + np.array([bx1, by1], dtype=np.float64)
+        K_inv = np.linalg.inv(camera_matrix)
+        R_o2c = R.from_quat(opencv_to_camera_quat)
+        R_wc = R.from_quat(cam_quat).as_matrix()
+        cam_origin = np.array(cam_pos, dtype=np.float64)
+
+        table_pts = []
+        for u, v in corners_img:
+            ray_opencv = K_inv @ np.array([u, v, 1.0])
+            ray_cam = R_o2c.apply(ray_opencv)
+            ray_world = R_wc @ ray_cam
+            if abs(ray_world[2]) < 1e-6:
+                return None
+            t = (table_z - cam_origin[2]) / ray_world[2]
+            if t <= 0:
+                return None
+            table_pts.append(cam_origin + ray_world * t)
+        table_pts = np.array(table_pts)
+
+        # Edge lengths from consecutive corners
+        edge_lens = [np.linalg.norm(table_pts[(i+1)%4] - table_pts[i])
+                     for i in range(4)]
+        w0 = max(edge_lens[0], edge_lens[2])  # opposing edges ~equal
+        l0 = max(edge_lens[1], edge_lens[3])
+
+        x0, y0 = centroid_3d[0], centroid_3d[1]
+
+        # --- Build reference mask in a padded ROI for IoU comparison ---
+        pad = 20
+        mh, mw = mask_roi.shape[:2]
+        roi_x1 = max(bx1 - pad, 0)
+        roi_y1 = max(by1 - pad, 0)
+        roi_x2 = bx1 + mw + pad
+        roi_y2 = by1 + mh + pad
+        roi_w = roi_x2 - roi_x1
+        roi_h = roi_y2 - roi_y1
+
+        ref_mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+        # Place mask_roi into the padded ROI
+        ox = bx1 - roi_x1
+        oy = by1 - roi_y1
+        ref_binary = (mask_roi > 0.5).astype(np.uint8)
+        ref_mask[oy:oy+mh, ox:ox+mw] = ref_binary
+        ref_area = float(ref_mask.sum())
+        if ref_area < 5:
+            return None
+
+        # --- Precompute constant transforms for the objective ---
+        R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
+        R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
+        fx = camera_matrix[0, 0]
+        fy = camera_matrix[1, 1]
+        cx = camera_matrix[0, 2]
+        cy = camera_matrix[1, 2]
+
+        _signs = np.array([
+            [-1, -1, -1], [-1, -1,  1], [-1,  1, -1], [-1,  1,  1],
+            [ 1, -1, -1], [ 1, -1,  1], [ 1,  1, -1], [ 1,  1,  1],
+        ], dtype=np.float64)
+
+        # Bbox containment bounds (full image coords)
+        if bbox is not None:
+            bb_x1, bb_y1, bb_x2, bb_y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+            bb_diag = max(np.hypot(bb_x2 - bb_x1, bb_y2 - bb_y1), 1.0)
+        else:
+            bb_x1 = bb_y1 = bb_x2 = bb_y2 = bb_diag = None
+
+        def _objective(params):
+            """Negative IoU with bbox overflow penalty."""
+            x, y, yaw, w, l = params
+            if w <= 0.001 or l <= 0.001:
+                return 0.0
+
+            center = np.array([x, y, table_z + h / 2.0])
+            rot = R.from_euler('z', yaw).as_matrix()
+            half = np.array([w, l, h]) / 2.0
+            local = _signs * half
+            world_corners = (rot @ local.T).T + center
+
+            cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T
+            opencv_corners = (R_c2o @ cam_corners.T).T
+
+            z_vals = opencv_corners[:, 2]
+            if np.any(z_vals <= 0.01):
+                return 0.0
+
+            us = fx * opencv_corners[:, 0] / z_vals + cx
+            vs = fy * opencv_corners[:, 1] / z_vals + cy
+
+            # Shift to ROI coordinates
+            pts = np.column_stack([us - roi_x1, vs - roi_y1]).astype(np.int32)
+
+            hull = cv2.convexHull(pts)
+            rendered = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            cv2.fillConvexPoly(rendered, hull, 1)
+
+            intersection = float(np.logical_and(rendered, ref_mask).sum())
+            union = float(np.logical_or(rendered, ref_mask).sum())
+            if union < 1:
+                return 0.0
+            iou = intersection / union
+
+            # Bbox containment penalty: penalize corners outside the YOLOE bbox
+            if bb_diag is not None:
+                overflow = 0.0
+                overflow += np.sum(np.maximum(bb_x1 - us, 0.0))  # left overflow
+                overflow += np.sum(np.maximum(us - bb_x2, 0.0))  # right overflow
+                overflow += np.sum(np.maximum(bb_y1 - vs, 0.0))  # top overflow
+                overflow += np.sum(np.maximum(vs - bb_y2, 0.0))  # bottom overflow
+                # Normalize by bbox diagonal so penalty is ~0-1 scale
+                penalty = overflow / bb_diag
+                iou = iou - 0.5 * penalty
+
+            return -iou
+
+        # --- Optimize with Nelder-Mead ---
+        x0_params = [x0, y0, yaw0, w0, l0]
+        best_result = minimize(_objective, x0_params, method='Nelder-Mead',
+                               options={'maxiter': 200, 'xatol': 1e-4, 'fatol': 1e-4})
+        best_iou = -best_result.fun
+
+        # Try extra yaw seeds if IoU is poor
+        if best_iou < 0.3:
+            for yaw_offset in [np.pi/4, np.pi/2]:
+                alt_params = [x0, y0, yaw0 + yaw_offset, w0, l0]
+                alt_result = minimize(_objective, alt_params, method='Nelder-Mead',
+                                      options={'maxiter': 200, 'xatol': 1e-4, 'fatol': 1e-4})
+                alt_iou = -alt_result.fun
+                if alt_iou > best_iou:
+                    best_iou = alt_iou
+                    best_result = alt_result
+
+        if best_iou < 0.1:
+            return None  # fit too poor to use
+
+        # --- Build output in same format as _fit_cuboid_obb ---
+        xf, yf, yaw_f, wf, lf = best_result.x
+        center_out = np.array([xf, yf, table_z + h / 2.0])
+        quat_out = R.from_euler('z', yaw_f).as_quat()  # [x, y, z, w]
+        dims_out = np.array([wf, lf, h])
+
+        return center_out, quat_out, dims_out
+
+    except Exception:
+        return None
 
 
 def draw_axis_aligned_line(image, box, orientation_angle=None):
@@ -689,38 +893,52 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         if pts_3d is not None and len(pts_3d) >= 10:
                             cuboid_result = _fit_cuboid_obb(pts_3d)
 
+                    # When table_z available, try silhouette fitting for tighter wireframes
+                    if table_z is not None and mask_roi is not None:
+                        sil_result = _fit_cuboid_from_silhouette(
+                            mask_roi, bx1, by1, camera_matrix,
+                            opencv_to_camera_quat, cam_quat, cam_pos, table_z,
+                            bbox=(bx1, by1, bx2, by2))
+                        if sil_result is not None:
+                            cuboid_result = sil_result
+
                     if cuboid_result is not None:
-                        point_world = cuboid_result[0]  # OBB centroid
+                        point_world = cuboid_result[0]  # cuboid centroid
                     else:
                         # Fallback: single ray + median depth
                         ray_normalized = ray_world / np.linalg.norm(ray_world)
                         point_world = cam_origin_world + ray_normalized * actual_distance
                 else:
-                    # No depth data — ray-table intersection
-                    # Try perspective-correct cuboid fitting via minAreaRect
-                    rect_result = None
-                    if mask_roi is not None:
-                        rect_result = _backproject_rect_to_table(
+                    # No depth data — try silhouette-based cuboid fitting
+                    if mask_roi is not None and table_z is not None:
+                        cuboid_result = _fit_cuboid_from_silhouette(
                             mask_roi, bx1, by1, camera_matrix,
-                            opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+                            opencv_to_camera_quat, cam_quat, cam_pos, table_z,
+                            bbox=(bx1, by1, bx2, by2))
 
-                    if rect_result is not None:
-                        point_world = rect_result[0]
-                        # rect_result[1] is world-frame orientation (not used
-                        # here — moments orientation_angle feeds the existing
-                        # 2D→3D quaternion conversion chain unchanged)
+                    if cuboid_result is not None:
+                        point_world = cuboid_result[0]
                     else:
-                        # Fallback: single-ray table intersection from moments centroid
-                        if abs(ray_world[2]) > 1e-6:
-                            t = (table_z - cam_origin_world[2]) / ray_world[2]
-                            if t > 0:
-                                point_world = cam_origin_world + ray_world * t
+                        # Fallback: back-projected rect centroid or ray-table
+                        rect_result = None
+                        if mask_roi is not None:
+                            rect_result = _backproject_rect_to_table(
+                                mask_roi, bx1, by1, camera_matrix,
+                                opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+
+                        if rect_result is not None:
+                            point_world = rect_result[0]
+                        else:
+                            if abs(ray_world[2]) > 1e-6:
+                                t = (table_z - cam_origin_world[2]) / ray_world[2]
+                                if t > 0:
+                                    point_world = cam_origin_world + ray_world * t
+                                else:
+                                    ray_normalized = ray_world / np.linalg.norm(ray_world)
+                                    point_world = cam_origin_world + ray_normalized * actual_distance
                             else:
                                 ray_normalized = ray_world / np.linalg.norm(ray_world)
                                 point_world = cam_origin_world + ray_normalized * actual_distance
-                        else:
-                            ray_normalized = ray_world / np.linalg.norm(ray_world)
-                            point_world = cam_origin_world + ray_normalized * actual_distance
 
                 # Step 5: Apply calibration offset to object position
                 if bridge_node is not None:
