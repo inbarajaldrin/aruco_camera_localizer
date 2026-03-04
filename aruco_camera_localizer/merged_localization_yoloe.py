@@ -737,6 +737,9 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                     'world_point': point_world,  # Store world point for matching
                     'detection_index': detection_index  # Track original order
                 }
+                if mask_roi is not None:
+                    meta['mask_roi'] = mask_roi
+                    meta['mask_bbox'] = (bx1, by1, bx2, by2)
                 if cuboid_result is not None:
                     meta['cuboid_center'] = cuboid_result[0]
                     meta['cuboid_quaternion'] = cuboid_result[1]
@@ -1052,6 +1055,16 @@ def main():
                 class_name = detection['class_name']
                 orientation_angle = detection['orientation_angle']
                 
+                # Draw segmentation mask as semi-transparent overlay
+                if 'mask_roi' in detection:
+                    mroi = detection['mask_roi']
+                    mbx1, mby1, mbx2, mby2 = detection['mask_bbox']
+                    overlay = frame.copy()
+                    mask_full = np.zeros(frame.shape[:2], dtype=np.uint8)
+                    mask_full[mby1:mby2, mbx1:mbx2] = (mroi > 0).astype(np.uint8) * 255
+                    overlay[mask_full > 0] = (overlay[mask_full > 0] * 0.5 + np.array([128, 0, 255]) * 0.5).astype(np.uint8)
+                    frame[:] = overlay
+
                 # Draw bounding box
                 x1, y1, x2, y2 = map(int, box)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)

@@ -113,16 +113,58 @@ The depth camera only sees the top surface of each object. The point cloud centr
 ### 3. Low YOLO confidence on simulated legos
 Scores 0.05–0.3 (vs 0.22–0.28 in earlier Phase B tests). Scene/camera angle may have changed. Not related to cuboid fitting.
 
+## Failed Attempt: Z-bias Fix + Bbox Constraint (2026-03-04) — REVERTED
+
+### What was tried
+1. **Z-bias fix**: `centroid_z = inlier_min_z - min(dimensions)/2` — shift centroid downward by half the smallest PCA dimension, using the minimum Z of inlier points as the "top surface" estimate.
+2. **Bbox constraint**: Project all 8 OBB corners to 2D, compute per-corner scale factor relative to the projected centroid, uniformly shrink dimensions so all corners fit inside the YOLOE detection bbox.
+
+### Process mistake — both fixes were implemented together without verifying either one
+The next steps listed bbox constraint and Z-fix as **separate items**. Instead of implementing #1, verifying it visually, then implementing #2, both were coded in a single pass. This made it impossible to tell which fix caused the regression, and they interacted badly.
+
+**RULE: Implement ONE change at a time. Verify visually (capture annotated image) and check position accuracy BEFORE starting the next change. Do NOT commit without user approval.**
+
+### Why it failed — cascading interaction between the two fixes
+1. **Z-fix shifts 3D centroid downward** → its 2D projection moves toward the bottom of the image.
+2. **Projected centroid ends up off-center in the bbox** — for objects near image edges (e.g., red block at bottom-right), the projected center can land near a bbox boundary.
+3. **Bbox constraint then over-shrinks**: it scales corner offsets relative to the projected centroid. When the centroid is near a bbox edge, corners on the opposite side have large offsets → the scale factor becomes tiny (e.g., 0.1) → dimensions collapse to near-zero → wireframes become tiny displaced shapes that don't wrap the object at all.
+
+### Visual result
+- Before: wireframes properly wrap objects (oversized but correct shape/orientation)
+- After: wireframes collapsed into tiny diamonds/squares displaced from the objects. Red block had cyan lines shooting off-screen.
+
+### Key lessons for future attempts
+1. **Don't chain fixes that interact with each other's assumptions.** The bbox constraint assumes the projected centroid is roughly centered in the bbox. The Z-fix violates that assumption by moving the centroid.
+2. **Z-fix via `min(point_cloud Z)` is unreliable.** At 45° camera angle, the point cloud is an oblique slab. `min Z` depends on mask boundary extent, not object geometry. It's NOT the top surface.
+3. **Bbox constraint by uniform scaling from projected centroid cannot work when the centroid projection is off-center.** Some sides get over-shrunk while others may still stick out. The fundamental problem: scaling dimensions doesn't reposition the cuboid.
+4. **PCA centroid position quality is dominated by mask quality**, not geometric corrections. YOLOE mask noise (±5mm XY per frame) is the primary error source, not Z-bias.
+5. **Do NOT modify the centroid position and then try to constrain the wireframe in the same pass.** These must be independent, or the constraint must account for the centroid shift.
+
+### If retrying these fixes
+- Apply bbox constraint and Z-fix **independently**, not together
+- For bbox constraint: instead of scaling dimensions from projected centroid, consider clipping the wireframe drawing to the bbox (purely visual) or constraining the 3D point cloud before PCA fitting
+- For Z-fix: consider using known object height from a catalog instead of PCA smallest dim. Or use a two-pass approach: cuboid for XY only, separate depth method for Z
+- Test each fix in isolation and verify wireframes visually before combining
+
 ## Next Steps
 
-### 1. Constrain cuboid to YOLOE detection bbox
-Clip or fit the 3D cuboid so its 2D projection stays within the YOLOE bounding box. This should prevent the oversized wireframe issue by using the detection box as an upper bound on the projected cuboid footprint.
+### 1. Fix cuboid orientation (the actual problem)
+**The seg mask is accurate** — it fits tightly on the lego bodies. The mask is NOT the problem. The problem is **PCA orientation doesn't align with the object edges**. PCA finds axes of maximum variance in the 3D point cloud, which can be rotated relative to the actual object geometry. This causes wireframe corners to extend beyond the object/bbox even though the underlying point cloud is tight.
+
+**Key insight**: if even 2 edges of the cuboid aligned with the segmentation mask edges, the whole cuboid would fit inside the YOLOE bbox. The fix is in the **fitting orientation**, not point cloud cleanup.
+
+**Do NOT scale dimensions from projected centroid** (see failed attempt above). **Do NOT visually clip the wireframe** — that hides wrong values behind a correct-looking overlay.
+
+Approaches to fix orientation:
+- Use `cv2.minAreaRect()` on the 2D seg mask to get the object's 2D orientation, then use that to constrain the cuboid's yaw/roll axes in 3D
+- Fit 2D OBB from mask edges first, back-project the 2D OBB edges to 3D, use those as the cuboid's principal axes instead of PCA
+- Hybrid: use 2D mask orientation for the two in-plane axes, use PCA only for the depth axis
 
 ### 2. Fix Z-axis bias
-Investigate approaches:
-- Use cuboid's smallest PCA dimension as height → snap centroid Z to `table_z + height/2`
-- Depth histogram analysis (object surface depth vs table depth) to infer object height
-- Two-pass: cuboid for XY centroid, table-z + measured height for Z
+**Do NOT use `min(point_cloud Z)` as top surface** (unreliable at oblique viewing angles). Better approaches:
+- Two-pass: use cuboid centroid for XY, use table-z + known object height for Z
+- If object height is unknown: use the depth range of the point cloud along the camera's viewing direction (not world Z) as the height estimate
+- Accept the Z-bias as inherent to single-viewpoint depth and document the expected error
 
 ## File Reference
 
