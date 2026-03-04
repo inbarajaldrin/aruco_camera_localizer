@@ -94,7 +94,7 @@ robots:
       # Root cause is likely camera pose or TF chain offset, not intrinsics.
       # TODO: Fix the underlying ray direction error, then set vfov=54.9.
       horizontal_fov: 69.4
-      vertical_fov: 42.5
+      vertical_fov: 54.9
 
       # OpenCV frame to Camera frame transformation
       # OpenCV convention: X=right, Y=down, Z=forward (in image)

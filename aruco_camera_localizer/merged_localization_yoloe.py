@@ -405,13 +405,9 @@ def _backproject_mask_to_pointcloud(mask_roi, depth_roi, bx1, by1, camera_matrix
     R_wc = R.from_quat(cam_quat).as_matrix()  # (3, 3)
     rays_world = (R_wc @ rays_cam.T).T  # (N, 3)
 
-    # Normalize rays and scale by depth (depth is radial/Euclidean)
-    norms = np.linalg.norm(rays_world, axis=1, keepdims=True)
-    norms[norms < 1e-10] = 1e-10
-    rays_normalized = rays_world / norms
-
+    # Scale rays by depth (Z-depth interpretation: depth is along camera Z-axis)
     cam_origin = np.array(cam_pos, dtype=np.float64)
-    points_world = cam_origin + rays_normalized * depths[:, np.newaxis]
+    points_world = cam_origin + rays_world * depths[:, np.newaxis]
 
     return points_world
 
@@ -905,9 +901,8 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                     if cuboid_result is not None:
                         point_world = cuboid_result[0]  # cuboid centroid
                     else:
-                        # Fallback: single ray + median depth
-                        ray_normalized = ray_world / np.linalg.norm(ray_world)
-                        point_world = cam_origin_world + ray_normalized * actual_distance
+                        # Fallback: single ray + median depth (Z-depth interpretation)
+                        point_world = cam_origin_world + ray_world * actual_distance
                 else:
                     # No depth data — try silhouette-based cuboid fitting
                     if mask_roi is not None and table_z is not None:
@@ -1095,7 +1090,17 @@ def main():
     # These are now managed by the global functions
 
     talk = not args.suppress_prints
-    
+
+    # Wait for first camera frame before entering main loop
+    # (model loading blocks CPU for ~20s, starving the spin thread)
+    import time as _time
+    print("Waiting for first camera frame...")
+    for _i in range(300):  # up to 30s
+        if bridge_node.get_latest_frame() is not None:
+            print(f"First frame received after {(_i+1)*0.1:.1f}s")
+            break
+        _time.sleep(0.1)
+
     print("\n" + "="*60)
     print("YOLO Camera Localizer")
     print("="*60)
@@ -1112,10 +1117,10 @@ def main():
             # Get the latest frame from the camera topic
             frame = bridge_node.get_latest_frame()
             
-            # If no frame available yet, wait a bit and continue
+            # If no frame available yet, wait for next frame
             if frame is None:
                 import time
-                time.sleep(0.01)  # 10ms
+                time.sleep(0.1)  # 100ms — give spin thread time for DDS callbacks
                 continue
 
             # Check for dynamic YOLO prompt updates
