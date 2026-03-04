@@ -88,9 +88,14 @@ robots:
       height: 480
       
       # Field of view (degrees)
+      # NOTE: Gazebo camera has square pixels (fx=fy=462.17), which means
+      # correct vfov should be 54.9°. However, vfov=42.5° (fy=617) partially
+      # compensates for a systematic ray direction bias (~27mm in Y-axis).
+      # Root cause is likely camera pose or TF chain offset, not intrinsics.
+      # TODO: Fix the underlying ray direction error, then set vfov=54.9.
       horizontal_fov: 69.4
       vertical_fov: 42.5
-      
+
       # OpenCV frame to Camera frame transformation
       # OpenCV convention: X=right, Y=down, Z=forward (in image)
       # For forward-facing camera pointing along -X axis in base frame
