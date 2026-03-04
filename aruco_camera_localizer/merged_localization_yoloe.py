@@ -425,10 +425,11 @@ def _fit_cuboid_obb(points_3d):
         points_3d: np.ndarray (N, 3) of world-frame 3D points.
 
     Returns:
-        (centroid, quaternion, dimensions) or None.
+        (centroid, quaternion, dimensions, inlier_min_z) or None.
         centroid: np.array([x, y, z])
         quaternion: np.array([x, y, z, w]) orientation of the OBB axes
         dimensions: np.array([w, h, d]) extents along each PCA axis (meters)
+        inlier_min_z: float, minimum Z among inlier points (approx top surface)
     """
     if points_3d is None or len(points_3d) < 10:
         return None
@@ -472,51 +473,121 @@ def _fit_cuboid_obb(points_3d):
 
         quaternion = R.from_matrix(rot_matrix).as_quat()  # [x, y, z, w]
 
-        return centroid, quaternion, dimensions
+        inlier_min_z = float(inlier_pts[:, 2].min())
+
+        return centroid, quaternion, dimensions, inlier_min_z
 
     except Exception:
         return None
 
 
-def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
-                          cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
-                          color=(0, 255, 255), thickness=2):
-    """Draw a 3D oriented bounding box wireframe projected onto the image.
+def _project_cuboid_corners(cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                            cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat):
+    """Project 8 OBB corners to 2D image coordinates.
 
-    Projection chain (inverse of detection ray chain):
-    world → camera frame (inv cam_quat) → OpenCV frame (inv opencv_to_camera) → image (K)
+    Returns:
+        (us, vs): arrays of 8 projected u,v coordinates, or (None, None) if any
+        corner is behind the camera.
     """
-    # Build 8 corners of the OBB: ±half along each axis
     half = cuboid_dimensions / 2.0
     signs = np.array([
         [-1, -1, -1], [-1, -1,  1], [-1,  1, -1], [-1,  1,  1],
         [ 1, -1, -1], [ 1, -1,  1], [ 1,  1, -1], [ 1,  1,  1],
     ], dtype=np.float64)
-    local_corners = signs * half  # (8, 3)
+    local_corners = signs * half
 
-    # Rotate to world frame and translate to centroid
     rot = R.from_quat(cuboid_quaternion).as_matrix()
-    world_corners = (rot @ local_corners.T).T + cuboid_center  # (8, 3)
+    world_corners = (rot @ local_corners.T).T + cuboid_center
 
-    # World → camera frame
     R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
     cam_origin = np.array(cam_pos, dtype=np.float64)
-    cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T  # (8, 3)
+    cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T
 
-    # Camera frame → OpenCV frame
     R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
-    opencv_corners = (R_c2o @ cam_corners.T).T  # (8, 3)
+    opencv_corners = (R_c2o @ cam_corners.T).T
 
-    # Project to image: u = fx * X/Z + cx, v = fy * Y/Z + cy
     z_vals = opencv_corners[:, 2]
     if np.any(z_vals <= 0.01):
-        return  # Some corners behind camera
+        return None, None
 
-    us = (camera_matrix[0, 0] * opencv_corners[:, 0] / z_vals + camera_matrix[0, 2]).astype(int)
-    vs = (camera_matrix[1, 1] * opencv_corners[:, 1] / z_vals + camera_matrix[1, 2]).astype(int)
-    pts_2d = list(zip(us, vs))
+    us = camera_matrix[0, 0] * opencv_corners[:, 0] / z_vals + camera_matrix[0, 2]
+    vs = camera_matrix[1, 1] * opencv_corners[:, 1] / z_vals + camera_matrix[1, 2]
+    return us, vs
 
-    # 12 edges of a cuboid
+
+def _constrain_cuboid_to_bbox(cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                              bbox, cam_pos, cam_quat, camera_matrix,
+                              opencv_to_camera_quat):
+    """Shrink cuboid dimensions so all projected corners fit within the YOLOE bbox.
+
+    Projects 8 OBB corners + the centroid to image. For each corner, computes
+    the max scale (relative to centroid projection) that keeps it inside the
+    bbox. Uses the tightest constraint across all corners.
+
+    Args:
+        cuboid_center, cuboid_quaternion, cuboid_dimensions: OBB params.
+        bbox: (x1, y1, x2, y2) YOLOE detection bounding box in pixels.
+        cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat: camera params.
+
+    Returns:
+        Adjusted cuboid_dimensions (np.array), or original if no shrink needed.
+    """
+    bx1, by1, bx2, by2 = bbox
+
+    us, vs = _project_cuboid_corners(
+        cuboid_center, cuboid_quaternion, cuboid_dimensions,
+        cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat)
+    if us is None:
+        return cuboid_dimensions
+
+    # Project the centroid itself to get the 2D anchor
+    center_3d = np.array(cuboid_center, dtype=np.float64).reshape(1, 3)
+    R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
+    cam_origin = np.array(cam_pos, dtype=np.float64)
+    cam_c = (R_wc_inv @ (center_3d - cam_origin).T).T
+    R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
+    oc = (R_c2o @ cam_c.T).T
+    if oc[0, 2] <= 0.01:
+        return cuboid_dimensions
+    cu = float(camera_matrix[0, 0] * oc[0, 0] / oc[0, 2] + camera_matrix[0, 2])
+    cv = float(camera_matrix[1, 1] * oc[0, 1] / oc[0, 2] + camera_matrix[1, 2])
+
+    # For each corner, compute scale that keeps it inside the bbox
+    scale = 1.0
+    for i in range(len(us)):
+        du = us[i] - cu
+        dv = vs[i] - cv
+        if du > 0.5:
+            s = (bx2 - cu) / du
+            scale = min(scale, s)
+        elif du < -0.5:
+            s = (cu - bx1) / (-du)
+            scale = min(scale, s)
+        if dv > 0.5:
+            s = (by2 - cv) / dv
+            scale = min(scale, s)
+        elif dv < -0.5:
+            s = (cv - by1) / (-dv)
+            scale = min(scale, s)
+
+    if scale >= 0.99 or scale <= 0:
+        return cuboid_dimensions
+
+    return cuboid_dimensions * scale
+
+
+def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                          cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
+                          color=(0, 255, 255), thickness=2):
+    """Draw a 3D oriented bounding box wireframe projected onto the image."""
+    us, vs = _project_cuboid_corners(
+        cuboid_center, cuboid_quaternion, cuboid_dimensions,
+        cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat)
+    if us is None:
+        return
+
+    pts_2d = list(zip(us.astype(int), vs.astype(int)))
+
     edges = [
         (0, 1), (2, 3), (4, 5), (6, 7),  # along axis 2
         (0, 2), (1, 3), (4, 6), (5, 7),  # along axis 1
@@ -690,7 +761,26 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                             cuboid_result = _fit_cuboid_obb(pts_3d)
 
                     if cuboid_result is not None:
-                        point_world = cuboid_result[0]  # OBB centroid
+                        c_center, c_quat, c_dims, c_min_z = cuboid_result
+
+                        # Z-bias fix: depth camera only sees top surface.
+                        # min Z of inliers ≈ top surface of object.
+                        # Smallest PCA dimension ≈ visible height.
+                        # Snap centroid Z = top_surface - half_height.
+                        height_est = float(c_dims.min())
+                        c_center = c_center.copy()
+                        c_center[2] = c_min_z - height_est / 2.0
+
+                        # Bbox constraint: shrink dims so projected wireframe
+                        # fits inside the YOLOE detection bounding box.
+                        c_dims = _constrain_cuboid_to_bbox(
+                            c_center, c_quat, c_dims,
+                            (bx1, by1, bx2, by2),
+                            cam_pos, cam_quat, camera_matrix,
+                            opencv_to_camera_quat)
+
+                        cuboid_result = (c_center, c_quat, c_dims, c_min_z)
+                        point_world = c_center
                     else:
                         # Fallback: single ray + median depth
                         ray_normalized = ray_world / np.linalg.norm(ray_world)
