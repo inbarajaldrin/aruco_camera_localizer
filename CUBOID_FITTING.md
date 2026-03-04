@@ -100,54 +100,38 @@ Dimensions are in the right ballpark but inflated, especially for blue (smallest
 
 Wireframes are drawn but appear oversized relative to the objects in the image. Root cause: at low YOLO confidence (0.05–0.3 for simulated legos), segmentation masks include background/shadow pixels that inflate the point cloud even after erosion and IQR filtering.
 
-## Improvements (2026-03-04)
-
-### 1. Bbox constraint — DONE
-`_constrain_cuboid_to_bbox()` projects 8 OBB corners + centroid to 2D, computes per-corner scale factor relative to the projected centroid to keep all corners inside the YOLOE detection bbox. Uniform scale (tightest constraint wins) — never grows dimensions.
-
-Extracted shared `_project_cuboid_corners()` helper used by both constraint and wireframe drawing.
-
-### 2. Z-bias fix — DONE
-After OBB fitting, `_fit_cuboid_obb()` now also returns `inlier_min_z` (minimum Z among inlier points, approximating the object's top surface). At the call site:
-- `height_est = min(dimensions)` — smallest PCA dimension approximates visible height
-- `centroid_z = inlier_min_z - height_est / 2`
-
-This pushes the centroid down from the top-surface midpoint to the estimated object center.
-
-### Results with both fixes
-
-| Color | New err | dz     | Old err | Old dz  |
-|-------|---------|--------|---------|---------|
-| Red   | 6–12mm  | +0.5–2 | 19.8mm  | +18.1   |
-| Green | 5–12mm  | +2–5   | 12.5mm  | +10.5   |
-| Blue  | 10–17mm | -6–-9  | 12.7mm  | +7.6    |
-
-**Z-axis fix**: Red dz improved from +18mm to ~+1mm, Green from +10mm to ~+3mm. Blue overcorrects (from +7.6 to ~-8mm) because the smallest PCA dimension (15mm) overestimates the 11mm true height for this small, noisy object.
-
-**XY accuracy**: dx/dy vary between runs (±5mm) due to YOLOE mask non-determinism, not code changes.
-
-**Mean error**: ~7–14mm depending on YOLOE mask quality (vs 15mm before).
-
 ## Known Issues
 
-### 1. Blue block Z overcorrection
-Smallest PCA dim (15mm) > true height (11mm) for the 2x2 lego. The Z-fix overshoots by ~3–4mm. Could improve by using known object height if available, or clamping the PCA height estimate.
+### 1. Wireframe too large
+The OBB wireframe extends beyond the actual object boundary in the image. Caused by noisy seg masks at low YOLO confidence. At higher confidence (>0.3), masks are tighter and this should improve.
 
-### 2. YOLOE mask non-determinism
-XY centroid varies ±5mm between restarts due to mask boundary noise. This is a YOLOE limitation, not a cuboid fitting issue. Higher confidence detections (>0.3) would help.
+### 2. Z-axis bias (dz = +8 to +18mm)
+The depth camera only sees the top surface of each object. The point cloud centroid sits above the true object center. This is a fundamental single-viewpoint limitation, not a code bug.
+- Table-Z method gets dz≈-5.5mm (half brick height error, but in the other direction)
+- True object center Z = table_z + half_object_height
 
 ### 3. Low YOLO confidence on simulated legos
 Scores 0.05–0.3 (vs 0.22–0.28 in earlier Phase B tests). Scene/camera angle may have changed. Not related to cuboid fitting.
+
+## Next Steps
+
+### 1. Constrain cuboid to YOLOE detection bbox
+Clip or fit the 3D cuboid so its 2D projection stays within the YOLOE bounding box. This should prevent the oversized wireframe issue by using the detection box as an upper bound on the projected cuboid footprint.
+
+### 2. Fix Z-axis bias
+Investigate approaches:
+- Use cuboid's smallest PCA dimension as height → snap centroid Z to `table_z + height/2`
+- Depth histogram analysis (object surface depth vs table depth) to infer object height
+- Two-pass: cuboid for XY centroid, table-z + measured height for Z
 
 ## File Reference
 
 All changes in: `aruco_camera_localizer/aruco_camera_localizer/merged_localization_yoloe.py`
 
-Key functions (approximate lines, may shift with edits):
+Key line ranges (approximate, may shift with edits):
 - `_backproject_mask_to_pointcloud()`: ~line 342
-- `_fit_cuboid_obb()`: ~line 418 — returns 4-tuple (centroid, quat, dims, inlier_min_z)
-- `_project_cuboid_corners()`: ~line 484 — shared projection helper
-- `_constrain_cuboid_to_bbox()`: ~line 520 — per-corner scale constraint
-- `draw_cuboid_wireframe()`: ~line 579 — uses shared projection helper
-- Cuboid call + Z-fix + bbox constraint: ~line 756
-- Wireframe draw in annotation loop: ~line 1070
+- `_fit_cuboid_obb()`: ~line 418
+- `draw_cuboid_wireframe()`: ~line 481
+- Cuboid call in depth path: ~line 680
+- Wireframe draw in annotation loop: ~line 1058
+- Cuboid metadata storage: ~line 700
