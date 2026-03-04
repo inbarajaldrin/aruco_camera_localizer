@@ -150,6 +150,8 @@ def parse_args():
                         help="Custom prompt mapping for prompts (format: prompt1:color1 prompt2:color2)")
     parser.add_argument("--headless", action='store_true',
                         help="Run without GUI window (no cv2.imshow). Annotated frames still published to /annotated_image.")
+    parser.add_argument("--table-z", type=float, default=None,
+                        help="Table surface Z in base frame (e.g. -0.091 for BEARING_1). Enables ray-table intersection when no depth available.")
     # Use parse_known_args to avoid conflicts with ROS args
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -269,6 +271,261 @@ def find_orientation_contour(roi):
     except Exception as e:
         return None
 
+def _backproject_rect_to_table(mask_roi, bx1, by1, camera_matrix,
+                               opencv_to_camera_quat, cam_quat, cam_pos, table_z):
+    """Back-project minAreaRect corners onto the table plane for perspective-correct centroid.
+
+    The moments centroid on a 2D mask is biased toward the camera due to perspective
+    (the near side of an object occupies more pixels). By projecting the oriented
+    rectangle corners onto the known table plane and averaging in 3D, this bias
+    is eliminated.
+
+    Returns:
+        (centroid_3d, orientation_angle_world) or None on failure.
+        centroid_3d: np.array([x, y, z]) on the table plane.
+        orientation_angle_world: yaw of the object's long axis in world XY (radians).
+    """
+    try:
+        binary = (mask_roi > 0.5).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) < 10:
+            return None
+
+        rect = cv2.minAreaRect(largest)
+        corners_roi = cv2.boxPoints(rect).astype(np.float64)  # (4, 2)
+
+        # Offset to full-image pixel coordinates
+        corners_img = corners_roi + np.array([bx1, by1], dtype=np.float64)
+
+        # Precompute transforms
+        K_inv = np.linalg.inv(camera_matrix)
+        R_o2c = R.from_quat(opencv_to_camera_quat)
+        R_wc = R.from_quat(cam_quat).as_matrix()
+        cam_origin = np.array(cam_pos, dtype=np.float64)
+
+        # Ray-table intersect for each of the 4 corners
+        table_points = []
+        for u, v in corners_img:
+            ray_opencv = K_inv @ np.array([u, v, 1.0])
+            ray_cam = R_o2c.apply(ray_opencv)
+            ray_world = R_wc @ ray_cam
+
+            if abs(ray_world[2]) < 1e-6:
+                return None  # ray nearly parallel to table
+            t = (table_z - cam_origin[2]) / ray_world[2]
+            if t <= 0:
+                return None  # ray points away from table
+            table_points.append(cam_origin + ray_world * t)
+
+        table_points = np.array(table_points)  # (4, 3)
+        centroid_3d = table_points.mean(axis=0)
+
+        # Orientation: atan2 of the longest edge projected onto XY
+        best_len, best_edge = 0.0, None
+        for i in range(4):
+            edge = table_points[(i + 1) % 4] - table_points[i]
+            elen = np.linalg.norm(edge[:2])
+            if elen > best_len:
+                best_len, best_edge = elen, edge
+        orientation_angle_world = np.arctan2(best_edge[1], best_edge[0])
+
+        return centroid_3d, orientation_angle_world
+    except Exception:
+        return None
+
+
+def _backproject_mask_to_pointcloud(mask_roi, depth_roi, bx1, by1, camera_matrix,
+                                     opencv_to_camera_quat, cam_quat, cam_pos):
+    """Back-project all masked depth pixels to a 3D point cloud in world frame.
+
+    Args:
+        mask_roi: Boolean mask (H, W) for the object within the bounding box.
+        depth_roi: Depth image crop (H, W) aligned with mask_roi.
+        bx1, by1: Top-left corner of the bounding box in full image coords.
+        camera_matrix: 3x3 intrinsic matrix K.
+        opencv_to_camera_quat: [x,y,z,w] quaternion from OpenCV to camera frame.
+        cam_quat: [x,y,z,w] camera quaternion in world frame.
+        cam_pos: [x,y,z] camera position in world frame.
+
+    Returns:
+        np.ndarray (N, 3) of world-frame 3D points, or None if too few valid pixels.
+    """
+    # Erode mask to strip noisy boundary pixels (depth edges bleed)
+    mask_u8 = mask_roi.astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    eroded = cv2.erode(mask_u8, kernel, iterations=1)
+    # Fall back to original mask if erosion kills everything
+    if eroded.any():
+        mask_roi = eroded > 0
+
+    # Get local pixel coords where mask is True
+    v_local, u_local = np.where(mask_roi)
+    if len(v_local) == 0:
+        return None
+
+    # Sample depth at mask pixels
+    depths = depth_roi[v_local, u_local].astype(np.float64)
+
+    # Handle uint16 encoding (millimeters)
+    if depth_roi.dtype == np.uint16:
+        depths = depths / 1000.0
+
+    # Keep only finite & positive depths
+    valid = np.isfinite(depths) & (depths > 0)
+    if valid.sum() < 10:
+        return None
+
+    v_local = v_local[valid]
+    u_local = u_local[valid]
+    depths = depths[valid]
+
+    # Convert to full-image pixel coords
+    u = u_local.astype(np.float64) + bx1
+    v = v_local.astype(np.float64) + by1
+
+    # Build homogeneous pixel coords (3, N)
+    ones = np.ones_like(u)
+    pixels = np.stack([u, v, ones], axis=0)  # (3, N)
+
+    # Rays in OpenCV frame: K_inv @ pixels → (3, N)
+    K_inv = np.linalg.inv(camera_matrix)
+    rays_opencv = K_inv @ pixels  # (3, N)
+
+    # Transform to camera frame (vectorized)
+    R_o2c = R.from_quat(opencv_to_camera_quat)
+    rays_cam = R_o2c.apply(rays_opencv.T)  # (N, 3)
+
+    # Transform to world frame
+    R_wc = R.from_quat(cam_quat).as_matrix()  # (3, 3)
+    rays_world = (R_wc @ rays_cam.T).T  # (N, 3)
+
+    # Normalize rays and scale by depth (depth is radial/Euclidean)
+    norms = np.linalg.norm(rays_world, axis=1, keepdims=True)
+    norms[norms < 1e-10] = 1e-10
+    rays_normalized = rays_world / norms
+
+    cam_origin = np.array(cam_pos, dtype=np.float64)
+    points_world = cam_origin + rays_normalized * depths[:, np.newaxis]
+
+    return points_world
+
+
+def _fit_cuboid_obb(points_3d):
+    """Fit an oriented bounding box (OBB) to a 3D point cloud via PCA.
+
+    Applies IQR-based outlier removal along each PCA axis so that noisy
+    mask edges / table bleed pixels don't inflate the cuboid.
+
+    Args:
+        points_3d: np.ndarray (N, 3) of world-frame 3D points.
+
+    Returns:
+        (centroid, quaternion, dimensions) or None.
+        centroid: np.array([x, y, z])
+        quaternion: np.array([x, y, z, w]) orientation of the OBB axes
+        dimensions: np.array([w, h, d]) extents along each PCA axis (meters)
+    """
+    if points_3d is None or len(points_3d) < 10:
+        return None
+
+    try:
+        # --- IQR outlier removal using PCA axes (always) ---
+        pca = PCA(n_components=3)
+        pca.fit(points_3d)
+        pca_axes = pca.components_  # (3, 3)
+
+        centroid_raw = points_3d.mean(axis=0)
+        centered = points_3d - centroid_raw
+        projections = centered @ pca_axes.T  # (N, 3)
+
+        inlier_mask = np.ones(len(points_3d), dtype=bool)
+        for ax in range(3):
+            q1, q3 = np.percentile(projections[:, ax], [25, 75])
+            iqr = q3 - q1
+            lo = q1 - 1.5 * iqr
+            hi = q3 + 1.5 * iqr
+            inlier_mask &= (projections[:, ax] >= lo) & (projections[:, ax] <= hi)
+
+        inlier_pts = points_3d[inlier_mask]
+        if len(inlier_pts) < 10:
+            inlier_pts = points_3d
+
+        centroid = inlier_pts.mean(axis=0)
+
+        # --- OBB axes from PCA on inliers ---
+        pca.fit(inlier_pts)
+        axes = pca.components_
+        rot_matrix = axes.T
+        if np.linalg.det(rot_matrix) < 0:
+            rot_matrix[:, 2] = -rot_matrix[:, 2]
+            axes = rot_matrix.T
+
+        # Dimensions from inlier projections
+        centered = inlier_pts - centroid
+        projections = centered @ axes.T
+        dimensions = projections.ptp(axis=0)
+
+        quaternion = R.from_matrix(rot_matrix).as_quat()  # [x, y, z, w]
+
+        return centroid, quaternion, dimensions
+
+    except Exception:
+        return None
+
+
+def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                          cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
+                          color=(0, 255, 255), thickness=2):
+    """Draw a 3D oriented bounding box wireframe projected onto the image.
+
+    Projection chain (inverse of detection ray chain):
+    world → camera frame (inv cam_quat) → OpenCV frame (inv opencv_to_camera) → image (K)
+    """
+    # Build 8 corners of the OBB: ±half along each axis
+    half = cuboid_dimensions / 2.0
+    signs = np.array([
+        [-1, -1, -1], [-1, -1,  1], [-1,  1, -1], [-1,  1,  1],
+        [ 1, -1, -1], [ 1, -1,  1], [ 1,  1, -1], [ 1,  1,  1],
+    ], dtype=np.float64)
+    local_corners = signs * half  # (8, 3)
+
+    # Rotate to world frame and translate to centroid
+    rot = R.from_quat(cuboid_quaternion).as_matrix()
+    world_corners = (rot @ local_corners.T).T + cuboid_center  # (8, 3)
+
+    # World → camera frame
+    R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
+    cam_origin = np.array(cam_pos, dtype=np.float64)
+    cam_corners = (R_wc_inv @ (world_corners - cam_origin).T).T  # (8, 3)
+
+    # Camera frame → OpenCV frame
+    R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
+    opencv_corners = (R_c2o @ cam_corners.T).T  # (8, 3)
+
+    # Project to image: u = fx * X/Z + cx, v = fy * Y/Z + cy
+    z_vals = opencv_corners[:, 2]
+    if np.any(z_vals <= 0.01):
+        return  # Some corners behind camera
+
+    us = (camera_matrix[0, 0] * opencv_corners[:, 0] / z_vals + camera_matrix[0, 2]).astype(int)
+    vs = (camera_matrix[1, 1] * opencv_corners[:, 1] / z_vals + camera_matrix[1, 2]).astype(int)
+    pts_2d = list(zip(us, vs))
+
+    # 12 edges of a cuboid
+    edges = [
+        (0, 1), (2, 3), (4, 5), (6, 7),  # along axis 2
+        (0, 2), (1, 3), (4, 6), (5, 7),  # along axis 1
+        (0, 4), (1, 5), (2, 6), (3, 7),  # along axis 0
+    ]
+    for i, j in edges:
+        cv2.line(image, pts_2d[i], pts_2d[j], color, thickness)
+
+
 def draw_axis_aligned_line(image, box, orientation_angle=None):
     """Draw a line through the leading axis aligned with object orientation"""
     x1, y1, x2, y2 = map(int, box)
@@ -307,7 +564,7 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, table_z=None):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -419,9 +676,51 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                 ray_world = R_wc @ ray_cam
                 cam_origin_world = np.array(cam_pos)
 
-                # Step 4: Place object at actual distance along ray
-                ray_normalized = ray_world / np.linalg.norm(ray_world)
-                point_world = cam_origin_world + ray_normalized * actual_distance
+                # Step 4: Place object along ray
+                cuboid_result = None
+                if actual_distance != distance or table_z is None:
+                    # Have depth data (or no table_z configured)
+                    # Try 3D cuboid fitting via depth point cloud + PCA
+                    if mask_roi is not None and depth_image is not None:
+                        depth_roi_full = depth_image[by1:by2, bx1:bx2]
+                        pts_3d = _backproject_mask_to_pointcloud(
+                            mask_roi, depth_roi_full, bx1, by1, camera_matrix,
+                            opencv_to_camera_quat, cam_quat, cam_pos)
+                        if pts_3d is not None and len(pts_3d) >= 10:
+                            cuboid_result = _fit_cuboid_obb(pts_3d)
+
+                    if cuboid_result is not None:
+                        point_world = cuboid_result[0]  # OBB centroid
+                    else:
+                        # Fallback: single ray + median depth
+                        ray_normalized = ray_world / np.linalg.norm(ray_world)
+                        point_world = cam_origin_world + ray_normalized * actual_distance
+                else:
+                    # No depth data — ray-table intersection
+                    # Try perspective-correct cuboid fitting via minAreaRect
+                    rect_result = None
+                    if mask_roi is not None:
+                        rect_result = _backproject_rect_to_table(
+                            mask_roi, bx1, by1, camera_matrix,
+                            opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+
+                    if rect_result is not None:
+                        point_world = rect_result[0]
+                        # rect_result[1] is world-frame orientation (not used
+                        # here — moments orientation_angle feeds the existing
+                        # 2D→3D quaternion conversion chain unchanged)
+                    else:
+                        # Fallback: single-ray table intersection from moments centroid
+                        if abs(ray_world[2]) > 1e-6:
+                            t = (table_z - cam_origin_world[2]) / ray_world[2]
+                            if t > 0:
+                                point_world = cam_origin_world + ray_world * t
+                            else:
+                                ray_normalized = ray_world / np.linalg.norm(ray_world)
+                                point_world = cam_origin_world + ray_normalized * actual_distance
+                        else:
+                            ray_normalized = ray_world / np.linalg.norm(ray_world)
+                            point_world = cam_origin_world + ray_normalized * actual_distance
 
                 # Step 5: Apply calibration offset to object position
                 if bridge_node is not None:
@@ -429,7 +728,7 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
 
                 # Store metadata for visualization
                 detection_index = len(detection_metadata)  # Track original detection order
-                detection_metadata.append({
+                meta = {
                     'box': box,
                     'score': score,
                     'class_name': class_name,
@@ -437,7 +736,12 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                     'orientation_angle': orientation_angle,
                     'world_point': point_world,  # Store world point for matching
                     'detection_index': detection_index  # Track original order
-                })
+                }
+                if cuboid_result is not None:
+                    meta['cuboid_center'] = cuboid_result[0]
+                    meta['cuboid_quaternion'] = cuboid_result[1]
+                    meta['cuboid_dimensions'] = cuboid_result[2]
+                detection_metadata.append(meta)
 
                 # Store by color with detection index for matching
                 if color_name not in detected_color_points:
@@ -615,7 +919,7 @@ def main():
                 frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat,
                 current_prompts, current_prompt_map,
                 OPENCV_TO_CAMERA_QUAT, 
-                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3
+                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3, table_z=args.table_z
             )
             
             # Convert YOLO detections to object format for objects_poses topic
@@ -759,7 +1063,17 @@ def main():
                 
                 # Draw axis-aligned line with orientation
                 draw_axis_aligned_line(frame, box, orientation_angle)
-                
+
+                # Draw 3D cuboid wireframe if available
+                if 'cuboid_center' in detection:
+                    draw_cuboid_wireframe(
+                        frame, detection['cuboid_center'],
+                        detection['cuboid_quaternion'],
+                        detection['cuboid_dimensions'],
+                        cam_pos, cam_quat, CAMERA_MATRIX,
+                        OPENCV_TO_CAMERA_QUAT,
+                        color=(0, 255, 255), thickness=2)
+
                 # Draw label with confidence and ID (replace spaces with underscores for display)
                 # Use object_name if available (includes ID), otherwise use class_name
                 if 'object_name' in detection:
