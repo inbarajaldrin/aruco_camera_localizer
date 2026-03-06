@@ -30,6 +30,9 @@ print(f"OpenCV-to-Camera quaternion: {OPENCV_TO_CAMERA_QUAT}")
 DETECTION_DISTANCE = config.get_detection_distance()
 print(f"Detection distance: {DETECTION_DISTANCE}m")
 
+# Ground plane Z offset from config (may be None if not configured for this robot)
+_GROUND_PLANE_Z_CONFIG = config.get_ground_plane_z_offset()
+
 fx = c_width / (2 * np.tan(np.deg2rad(c_hfov / 2)))
 print(f"Calculated fx as {fx}")
 
@@ -151,8 +154,8 @@ def parse_args():
                         help="Custom prompt mapping for prompts (format: prompt1:color1 prompt2:color2)")
     parser.add_argument("--headless", action='store_true',
                         help="Run without GUI window (no cv2.imshow). Annotated frames still published to /annotated_image.")
-    parser.add_argument("--table-z", type=float, default=None,
-                        help="Table surface Z in base frame (e.g. -0.091 for BEARING_1). Enables ray-table intersection when no depth available.")
+    parser.add_argument("--additional-z-offset", type=float, default=0.0,
+                        help="Additional Z offset added to ground_plane_z_offset from config (meters). For debug/tuning.")
     # Use parse_known_args to avoid conflicts with ROS args
     args, unknown = parser.parse_known_args()
     return args, unknown
@@ -273,7 +276,7 @@ def find_orientation_contour(roi):
         return None
 
 def _backproject_rect_to_table(mask_roi, bx1, by1, camera_matrix,
-                               opencv_to_camera_quat, cam_quat, cam_pos, table_z):
+                               opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z):
     """Back-project minAreaRect corners onto the table plane for perspective-correct centroid.
 
     The moments centroid on a 2D mask is biased toward the camera due to perspective
@@ -318,7 +321,7 @@ def _backproject_rect_to_table(mask_roi, bx1, by1, camera_matrix,
 
             if abs(ray_world[2]) < 1e-6:
                 return None  # ray nearly parallel to table
-            t = (table_z - cam_origin[2]) / ray_world[2]
+            t = (ground_plane_z - cam_origin[2]) / ray_world[2]
             if t <= 0:
                 return None  # ray points away from table
             table_points.append(cam_origin + ray_world * t)
@@ -534,7 +537,7 @@ def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimens
 
 def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
                                  opencv_to_camera_quat, cam_quat, cam_pos,
-                                 table_z, known_height=None,
+                                 ground_plane_z, known_height=None,
                                  bbox=None):
     """Fit 3D cuboid by maximizing IoU between projected silhouette and seg mask.
 
@@ -549,7 +552,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
         opencv_to_camera_quat: [x,y,z,w] quaternion from OpenCV to camera frame.
         cam_quat: [x,y,z,w] camera quaternion in world frame.
         cam_pos: [x,y,z] camera position in world frame.
-        table_z: Known Z height of the table plane in world frame.
+        ground_plane_z: Known Z height of the ground plane in arm base frame.
         known_height: Object height in meters (default 0.011 for lego bricks).
         bbox: (x1, y1, x2, y2) YOLOE detection bbox for containment constraint.
 
@@ -562,7 +565,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
         # --- Initialize from back-projected minAreaRect ---
         rect_result = _backproject_rect_to_table(
             mask_roi, bx1, by1, camera_matrix,
-            opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+            opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z)
         if rect_result is None:
             return None
 
@@ -592,7 +595,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
             ray_world = R_wc @ ray_cam
             if abs(ray_world[2]) < 1e-6:
                 return None
-            t = (table_z - cam_origin[2]) / ray_world[2]
+            t = (ground_plane_z - cam_origin[2]) / ray_world[2]
             if t <= 0:
                 return None
             table_pts.append(cam_origin + ray_world * t)
@@ -652,7 +655,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
             if w <= 0.001 or l <= 0.001:
                 return 0.0
 
-            center = np.array([x, y, table_z + h / 2.0])
+            center = np.array([x, y, ground_plane_z + h / 2.0])
             rot = R.from_euler('z', yaw).as_matrix()
             half = np.array([w, l, h]) / 2.0
             local = _signs * half
@@ -716,7 +719,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
 
         # --- Build output in same format as _fit_cuboid_obb ---
         xf, yf, yaw_f, wf, lf = best_result.x
-        center_out = np.array([xf, yf, table_z + h / 2.0])
+        center_out = np.array([xf, yf, ground_plane_z + h / 2.0])
         quat_out = R.from_euler('z', yaw_f).as_quat()  # [x, y, z, w]
         dims_out = np.array([wf, lf, h])
 
@@ -764,7 +767,7 @@ def draw_axis_aligned_line(image, box, orientation_angle=None):
             # Vertical line
             cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, table_z=None):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, ground_plane_z=None):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -878,8 +881,8 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
 
                 # Step 4: Place object along ray
                 cuboid_result = None
-                if actual_distance != distance or table_z is None:
-                    # Have depth data (or no table_z configured)
+                if actual_distance != distance or ground_plane_z is None:
+                    # Have depth data (or no ground_plane_z configured)
                     # Try 3D cuboid fitting via depth point cloud + PCA
                     if mask_roi is not None and depth_image is not None:
                         depth_roi_full = depth_image[by1:by2, bx1:bx2]
@@ -889,11 +892,11 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         if pts_3d is not None and len(pts_3d) >= 10:
                             cuboid_result = _fit_cuboid_obb(pts_3d)
 
-                    # When table_z available, try silhouette fitting for tighter wireframes
-                    if table_z is not None and mask_roi is not None:
+                    # When ground_plane_z available, try silhouette fitting for tighter wireframes
+                    if ground_plane_z is not None and mask_roi is not None:
                         sil_result = _fit_cuboid_from_silhouette(
                             mask_roi, bx1, by1, camera_matrix,
-                            opencv_to_camera_quat, cam_quat, cam_pos, table_z,
+                            opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z,
                             bbox=(bx1, by1, bx2, by2))
                         if sil_result is not None:
                             cuboid_result = sil_result
@@ -905,10 +908,10 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         point_world = cam_origin_world + ray_world * actual_distance
                 else:
                     # No depth data — try silhouette-based cuboid fitting
-                    if mask_roi is not None and table_z is not None:
+                    if mask_roi is not None and ground_plane_z is not None:
                         cuboid_result = _fit_cuboid_from_silhouette(
                             mask_roi, bx1, by1, camera_matrix,
-                            opencv_to_camera_quat, cam_quat, cam_pos, table_z,
+                            opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z,
                             bbox=(bx1, by1, bx2, by2))
 
                     if cuboid_result is not None:
@@ -919,13 +922,13 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         if mask_roi is not None:
                             rect_result = _backproject_rect_to_table(
                                 mask_roi, bx1, by1, camera_matrix,
-                                opencv_to_camera_quat, cam_quat, cam_pos, table_z)
+                                opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z)
 
                         if rect_result is not None:
                             point_world = rect_result[0]
                         else:
                             if abs(ray_world[2]) > 1e-6:
-                                t = (table_z - cam_origin_world[2]) / ray_world[2]
+                                t = (ground_plane_z - cam_origin_world[2]) / ray_world[2]
                                 if t > 0:
                                     point_world = cam_origin_world + ray_world * t
                                 else:
@@ -972,7 +975,18 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
 def main():
     # Parse args first, before initializing ROS
     args, unknown_args = parse_args()
-    
+
+    # Compute effective ground_plane_z from config + CLI offset
+    if _GROUND_PLANE_Z_CONFIG is not None:
+        ground_plane_z = _GROUND_PLANE_Z_CONFIG + args.additional_z_offset
+        print(f"Ground plane Z: {_GROUND_PLANE_Z_CONFIG} (config) + {args.additional_z_offset} (CLI) = {ground_plane_z}")
+    else:
+        ground_plane_z = args.additional_z_offset if args.additional_z_offset != 0.0 else None
+        if ground_plane_z is not None:
+            print(f"Ground plane Z: {ground_plane_z} (CLI only, no config value)")
+        else:
+            print("Ground plane Z: not configured (cuboid table-snapping disabled)")
+
     # Start ROS node with remaining args
     bridge_node = start_ros_node(camera_topic=args.camera_topic, depth_topic=args.depth_topic)
     
@@ -1145,7 +1159,7 @@ def main():
                 frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat,
                 current_prompts, current_prompt_map,
                 OPENCV_TO_CAMERA_QUAT, 
-                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3, table_z=args.table_z
+                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3, ground_plane_z=ground_plane_z
             )
             
             # Convert YOLO detections to object format for objects_poses topic

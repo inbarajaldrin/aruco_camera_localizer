@@ -108,6 +108,9 @@ robots:
       # Distance from camera to place detected objects (meters)
       # Objects are placed at this distance along the camera's optical axis
       distance: 0.132  # 132mm for robosort forward-facing setup
+      # Ground plane Z coordinate in arm base frame (BEARING_1) in meters.
+      # The arm base sits 91mm above the surface the robot drives on.
+      ground_plane_z_offset: -0.091
     
     # Transform (TF) configuration
     transforms:

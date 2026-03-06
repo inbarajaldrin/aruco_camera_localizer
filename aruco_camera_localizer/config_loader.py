@@ -89,6 +89,10 @@ class RobotConfig:
     def get_detection_distance(self):
         """Get detection distance from camera (meters)"""
         return self._config['detection']['distance']
+
+    def get_ground_plane_z_offset(self):
+        """Get ground plane Z offset in arm base frame (meters), or None if not configured"""
+        return self._config['detection'].get('ground_plane_z_offset', None)
     
     # ========== Transform Configuration ==========
     

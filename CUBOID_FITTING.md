@@ -18,7 +18,7 @@ The cuboid fitting system estimates 3D oriented bounding boxes for detected obje
 2. **Build reference mask** in a padded ROI for efficient IoU computation.
 3. **Optimize** with `scipy.optimize.minimize(Nelder-Mead, maxiter=200)`:
    - Parameters: `[x, y, yaw, w, l]` (h fixed at known_height, default 11mm for lego bricks)
-   - Z derived from table plane: `z = table_z + h/2`
+   - Z derived from table plane: `z = ground_plane_z + h/2`
    - Objective: negative IoU between projected cuboid convex hull and segmentation mask
    - Extra yaw seeds (yaw+π/4, yaw+π/2) tried if IoU < 0.3
 4. **Return** `(center, quaternion, dimensions)` — same format as `_fit_cuboid_obb()`.
@@ -31,21 +31,21 @@ The cuboid fitting system estimates 3D oriented bounding boxes for detected obje
 
 ### Integration in `detect_yolo_blobs()`
 
-- **Depth path** (actual_distance != distance or table_z is None):
+- **Depth path** (actual_distance != distance or ground_plane_z is None):
   - First tries PCA cuboid via depth point cloud (existing behavior)
-  - If table_z is available and mask exists, also tries silhouette fitting — prefers it over PCA if it succeeds
+  - If ground_plane_z is available and mask exists, also tries silhouette fitting — prefers it over PCA if it succeeds
   - Falls back to single ray + median depth
 
-- **No-depth path** (table_z provided, depth returns -inf):
+- **No-depth path** (ground_plane_z provided, depth returns -inf):
   - Primary: silhouette-based cuboid fitting
   - Fallback: back-projected rect centroid
   - Last resort: ray-table intersection from moments centroid
 
 ### Results (2026-03-04)
 
-Test scene: 3 lego bricks in Gazebo (headless), camera tilted at -0.7854 rad, `--table-z -0.091`.
+Test scene: 3 lego bricks in Gazebo (headless), camera tilted at -0.7854 rad, `ground_plane_z_offset: -0.091` (from robot_config.yaml).
 
-**Z-axis**: Exact at -85.5mm (= table_z + h/2 = -91.0 + 5.5), matching ground truth perfectly.
+**Z-axis**: Exact at -85.5mm (= ground_plane_z + h/2 = -91.0 + 5.5), matching ground truth perfectly.
 
 **XY-axis**: Consistent with known camera calibration bias (~60-70mm Y-axis systematic offset documented as a separate issue). X error ~15mm.
 
@@ -56,7 +56,7 @@ Test scene: 3 lego bricks in Gazebo (headless), camera tilted at -0.7854 rad, `-
 ### Depth PCA — Original approach
 - Back-project masked depth pixels → 3D point cloud → PCA for OBB
 - **Problem**: PCA orientation doesn't align with object edges → wireframes overshoot
-- **Status**: Kept as fallback in depth path, but silhouette fitting preferred when table_z available
+- **Status**: Kept as fallback in depth path, but silhouette fitting preferred when ground_plane_z available
 
 ### Z-bias fix + Bbox constraint — REVERTED
 - Shifted centroid by Z-offset, constrained wireframe to fit inside bbox
