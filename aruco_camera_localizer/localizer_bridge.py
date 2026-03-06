@@ -3,6 +3,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, Point, TransformStamped, Transform, Vector3, Quaternion
 from std_msgs.msg import Header, ColorRGBA, String
+from std_srvs.srv import SetBool
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from tf2_msgs.msg import TFMessage
@@ -57,7 +58,12 @@ class LocalizerBridge(Node):
         # --- Latest depth image ---
         self.latest_depth = None
         self.depth_lock = threading.Lock()
-        
+
+        # --- Orientation axis selection (major=default, minor=cross-axis) ---
+        self.use_minor_axis = False
+        self.create_service(SetBool, 'yoloe/cross_axis',
+                            self._cross_axis_cb)
+
         # Get TCP pose topic from configuration
         tcp_pose_topic = config.get_tcp_pose_topic()
         
@@ -115,6 +121,14 @@ class LocalizerBridge(Node):
         """Publish the annotated/processed frame that's displayed in OpenCV window"""
         img_msg = self.bridge.cv2_to_imgmsg(frame, "bgr8")
         self.annotated_image_publisher.publish(img_msg)
+
+    def _cross_axis_cb(self, request, response):
+        self.use_minor_axis = request.data
+        axis_name = "minor (cross-axis)" if request.data else "major (default)"
+        response.success = True
+        response.message = f"Orientation axis set to {axis_name}"
+        self.get_logger().info(response.message)
+        return response
 
     def ee_pose_callback(self, msg: PoseStamped):
         with self.lock:

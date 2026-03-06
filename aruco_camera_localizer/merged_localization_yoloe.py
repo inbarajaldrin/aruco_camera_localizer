@@ -39,6 +39,26 @@ print(f"Calculated fx as {fx}")
 fy = c_height / (2 * np.tan(np.deg2rad(c_vfov / 2)))
 print(f"Calculated fy as {fy}")
 
+# Previous cuboid params for temporal seeding: {color_name: [(x, y, yaw, w, l), ...]}
+_prev_cuboid_params = {}
+
+def _lookup_prev_cuboid(color_name, world_point, threshold=0.02):
+    """Find previous frame's cuboid params for the closest object of the same color.
+
+    Returns [x, y, yaw, w, l] or None. Threshold in meters (default 20mm).
+    """
+    prev_list = _prev_cuboid_params.get(color_name)
+    if not prev_list:
+        return None
+    best_dist = threshold
+    best_params = None
+    for entry in prev_list:
+        dist = np.linalg.norm(world_point[:2] - np.array([entry[0], entry[1]]))
+        if dist < best_dist:
+            best_dist = dist
+            best_params = entry
+    return list(best_params) if best_params is not None else None
+
 def convert_2d_orientation_to_quaternion(orientation_angle, cam_quat, opencv_to_camera_quat):
     """
     Convert 2D orientation angle from PCA to 3D quaternion in world frame.
@@ -237,43 +257,6 @@ def find_centroid_and_orientation_moments(roi, mask_roi=None):
         return None
 
 
-def find_orientation_pca(roi):
-    """Find object orientation (legacy wrapper, now uses moments)"""
-    result = find_centroid_and_orientation_moments(roi)
-    if result is not None:
-        _, _, angle, elongation = result
-        return angle, elongation
-    return None
-
-def find_orientation_contour(roi):
-    """Find object orientation using contour analysis (minAreaRect)"""
-    try:
-        # Convert to grayscale
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Find contours
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return None
-        
-        # Get the largest contour
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Get minimum area rectangle
-        rect = cv2.minAreaRect(largest_contour)
-        angle = rect[2]  # Angle in degrees
-        
-        # Convert to radians and normalize
-        angle_rad = np.radians(angle)
-        
-        return angle_rad, rect[1]  # Return angle and dimensions
-        
-    except Exception as e:
-        return None
 
 def _backproject_rect_to_table(mask_roi, bx1, by1, camera_matrix,
                                opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z):
@@ -538,7 +521,7 @@ def draw_cuboid_wireframe(image, cuboid_center, cuboid_quaternion, cuboid_dimens
 def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
                                  opencv_to_camera_quat, cam_quat, cam_pos,
                                  ground_plane_z, known_height=None,
-                                 bbox=None):
+                                 bbox=None, prev_params=None):
     """Fit 3D cuboid by maximizing IoU between projected silhouette and seg mask.
 
     Instead of relying on depth data and PCA (which misaligns with object edges),
@@ -555,6 +538,7 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
         ground_plane_z: Known Z height of the ground plane in arm base frame.
         known_height: Object height in meters (default 0.011 for lego bricks).
         bbox: (x1, y1, x2, y2) YOLOE detection bbox for containment constraint.
+        prev_params: Optional [x, y, yaw, w, l] from previous frame for temporal seeding.
 
     Returns:
         (center, quaternion, dimensions) or None on failure.
@@ -698,12 +682,23 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
             return -iou
 
         # --- Optimize with Nelder-Mead ---
-        x0_params = [x0, y0, yaw0, w0, l0]
-        best_result = minimize(_objective, x0_params, method='Nelder-Mead',
-                               options={'maxiter': 200, 'xatol': 1e-4, 'fatol': 1e-4})
-        best_iou = -best_result.fun
+        # Try previous frame's params first (temporal seeding for stability)
+        seeds = []
+        if prev_params is not None:
+            seeds.append(list(prev_params))
+        seeds.append([x0, y0, yaw0, w0, l0])
 
-        # Try extra yaw seeds if IoU is poor
+        best_result = None
+        best_iou = -1.0
+        for seed in seeds:
+            result = minimize(_objective, seed, method='Nelder-Mead',
+                              options={'maxiter': 200, 'xatol': 1e-4, 'fatol': 1e-4})
+            iou = -result.fun
+            if iou > best_iou:
+                best_iou = iou
+                best_result = result
+
+        # Try extra yaw seeds if IoU is still poor
         if best_iou < 0.3:
             for yaw_offset in [np.pi/4, np.pi/2]:
                 alt_params = [x0, y0, yaw0 + yaw_offset, w0, l0]
@@ -729,43 +724,79 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
         return None
 
 
-def draw_axis_aligned_line(image, box, orientation_angle=None):
-    """Draw a line through the leading axis aligned with object orientation"""
-    x1, y1, x2, y2 = map(int, box)
-    center_x = (x1 + x2) // 2
-    center_y = (y1 + y2) // 2
-    
-    if orientation_angle is not None:
-        # Use the calculated orientation
-        # Calculate line endpoints based on orientation
-        line_length = max(x2 - x1, y2 - y1) // 2
-        
-        # Calculate endpoints of the axis line
-        end_x1 = int(center_x + line_length * np.cos(orientation_angle))
-        end_y1 = int(center_y + line_length * np.sin(orientation_angle))
-        end_x2 = int(center_x - line_length * np.cos(orientation_angle))
-        end_y2 = int(center_y - line_length * np.sin(orientation_angle))
-        
-        # Draw the oriented axis line (thick cyan line)
-        cv2.line(image, (end_x1, end_y1), (end_x2, end_y2), (255, 255, 0), 4)  # Cyan line
-        
-        # Draw arrow to show direction
-        arrow_length = 30
-        arrow_x = int(end_x1 + arrow_length * np.cos(orientation_angle))
-        arrow_y = int(end_y1 + arrow_length * np.sin(orientation_angle))
-        cv2.arrowedLine(image, (end_x1, end_y1), (arrow_x, arrow_y), (0, 255, 255), 3, tipLength=0.3)  # Yellow arrow
-        
+def draw_cuboid_orientation_axes(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
+                                 cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat):
+    """Draw two orientation axes from the cuboid fit, projected into the image.
+
+    - Major axis (larger horizontal dim): LIGHT BLUE (cyan) line + yellow arrowhead
+    - Minor axis (smaller horizontal dim): MAGENTA line + yellow arrowhead
+
+    The major axis corresponds to the object yaw (long axis), and the minor
+    axis is the default grasp width direction (short axis / cross-axis).
+    """
+    dims = np.asarray(cuboid_dimensions, dtype=np.float64)
+    rot = R.from_quat(cuboid_quaternion).as_matrix()
+    center = np.asarray(cuboid_center, dtype=np.float64)
+
+    # dims[0] = w (axis 0), dims[1] = l (axis 1), dims[2] = h (axis 2, vertical)
+    # Determine major/minor among the two horizontal axes
+    if dims[0] >= dims[1]:
+        major_idx, minor_idx = 0, 1
     else:
-        # Fallback to simple axis-aligned line (original behavior)
-        width = x2 - x1
-        height = y2 - y1
-        
-        if width > height:
-            # Horizontal line
-            cv2.line(image, (x1, center_y), (x2, center_y), (255, 255, 0), 3)
-        else:
-            # Vertical line
-            cv2.line(image, (center_x, y1), (center_x, y2), (255, 255, 0), 3)
+        major_idx, minor_idx = 1, 0
+
+    # Build world-space axis endpoints (half-extent along each axis from center)
+    axis_endpoints = []
+    for idx in [major_idx, minor_idx]:
+        direction = rot[:, idx]  # column = axis direction in world
+        half_len = dims[idx] / 2.0
+        p_pos = center + direction * half_len * 1.5  # extend a bit past the cuboid
+        p_neg = center - direction * half_len * 1.5
+        axis_endpoints.append((p_pos, p_neg))
+
+    # Project to image
+    R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
+    R_c2o = R.from_quat(opencv_to_camera_quat).inv().as_matrix()
+    cam_origin = np.asarray(cam_pos, dtype=np.float64)
+
+    def _project_point(pt_world):
+        cam_pt = R_wc_inv @ (pt_world - cam_origin)
+        opencv_pt = R_c2o @ cam_pt
+        if opencv_pt[2] <= 0.01:
+            return None
+        u = camera_matrix[0, 0] * opencv_pt[0] / opencv_pt[2] + camera_matrix[0, 2]
+        v = camera_matrix[1, 1] * opencv_pt[1] / opencv_pt[2] + camera_matrix[1, 2]
+        return int(u), int(v)
+
+    center_px = _project_point(center)
+    if center_px is None:
+        return
+
+    line_colors = [
+        (255, 255, 0),  # LIGHT BLUE (cyan in BGR) = major axis (long axis / object yaw)
+        (255, 0, 255),  # MAGENTA = minor axis (short axis / grasp width)
+    ]
+    arrow_color = (0, 255, 255)  # YELLOW arrowhead for both
+    labels = ['MAJ', 'MIN']
+
+    for i, (p_pos, p_neg) in enumerate(axis_endpoints):
+        px_pos = _project_point(p_pos)
+        px_neg = _project_point(p_neg)
+        if px_pos is None or px_neg is None:
+            continue
+        # Draw the full line
+        cv2.line(image, px_neg, px_pos, line_colors[i], 3)
+        # Fixed-size yellow arrowhead (30px) past the line end
+        dx = px_pos[0] - center_px[0]
+        dy = px_pos[1] - center_px[1]
+        length = max((dx**2 + dy**2)**0.5, 1e-3)
+        arrow_end = (int(px_pos[0] + 30 * dx / length),
+                     int(px_pos[1] + 30 * dy / length))
+        cv2.arrowedLine(image, px_pos, arrow_end, arrow_color, 3, tipLength=0.5)
+        # Label
+        cv2.putText(image, labels[i], (arrow_end[0] + 5, arrow_end[1] - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, line_colors[i], 1)
+
 
 def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, ground_plane_z=None):
     """Detect objects using YOLO and convert to world points, grouped by color"""
@@ -881,6 +912,15 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
 
                 # Step 4: Place object along ray
                 cuboid_result = None
+
+                # Look up previous cuboid params for temporal seeding
+                _prev_seed = None
+                if ground_plane_z is not None and abs(ray_world[2]) > 1e-6:
+                    t_approx = (ground_plane_z - cam_origin_world[2]) / ray_world[2]
+                    if t_approx > 0:
+                        approx_world = cam_origin_world + ray_world * t_approx
+                        _prev_seed = _lookup_prev_cuboid(color_name, approx_world)
+
                 if actual_distance != distance or ground_plane_z is None:
                     # Have depth data (or no ground_plane_z configured)
                     # Try 3D cuboid fitting via depth point cloud + PCA
@@ -897,7 +937,8 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         sil_result = _fit_cuboid_from_silhouette(
                             mask_roi, bx1, by1, camera_matrix,
                             opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z,
-                            bbox=(bx1, by1, bx2, by2))
+                            bbox=(bx1, by1, bx2, by2),
+                            prev_params=_prev_seed)
                         if sil_result is not None:
                             cuboid_result = sil_result
 
@@ -912,7 +953,8 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         cuboid_result = _fit_cuboid_from_silhouette(
                             mask_roi, bx1, by1, camera_matrix,
                             opencv_to_camera_quat, cam_quat, cam_pos, ground_plane_z,
-                            bbox=(bx1, by1, bx2, by2))
+                            bbox=(bx1, by1, bx2, by2),
+                            prev_params=_prev_seed)
 
                     if cuboid_result is not None:
                         point_world = cuboid_result[0]
@@ -1245,13 +1287,22 @@ def main():
                     detection_idx = point_data['detection_index']
                     object_index = object_assignments.get(detection_idx, i)
                     
-                    # Get orientation from detection metadata
-                    orientation_quat = np.array([0.0, 0.0, 0.0, 1.0])  # Default identity quaternion
-                    if metadata['orientation_angle'] is not None:
-                        # Convert 2D orientation angle to 3D quaternion
+                    # Get orientation: cuboid yaw from major or minor axis, fall back to moments
+                    if 'cuboid_quaternion' in metadata:
+                        dims = metadata['cuboid_dimensions']
+                        rot = R.from_quat(metadata['cuboid_quaternion']).as_matrix()
+                        major_idx = 0 if dims[0] >= dims[1] else 1
+                        minor_idx = 1 - major_idx
+                        use_minor = bridge_node is not None and bridge_node.use_minor_axis
+                        axis_dir = rot[:, minor_idx if use_minor else major_idx]
+                        yaw = np.arctan2(axis_dir[1], axis_dir[0])
+                        orientation_quat = R.from_euler('z', yaw).as_quat()
+                    elif metadata['orientation_angle'] is not None:
                         orientation_quat = convert_2d_orientation_to_quaternion(
                             metadata['orientation_angle'], cam_quat, OPENCV_TO_CAMERA_QUAT
                         )
+                    else:
+                        orientation_quat = np.array([0.0, 0.0, 0.0, 1.0])
                     
                     # Store object name in metadata for label display
                     object_name = f"{color_name}_{object_index}"
@@ -1278,6 +1329,19 @@ def main():
                         "name": obj["name"],
                         "position": obj["position"]
                     })
+
+            # Store cuboid params for temporal seeding in next frame
+            _prev_cuboid_params.clear()
+            for meta in detection_metadata:
+                if 'cuboid_center' in meta:
+                    cn = meta['color_name']
+                    c = meta['cuboid_center']
+                    q = meta['cuboid_quaternion']
+                    d = meta['cuboid_dimensions']
+                    yaw = R.from_quat(q).as_euler('ZYX')[0]
+                    if cn not in _prev_cuboid_params:
+                        _prev_cuboid_params[cn] = []
+                    _prev_cuboid_params[cn].append((c[0], c[1], yaw, d[0], d[1]))
             
             # Camera pose is published by external package, we only subscribe to it
             # Publish all YOLO detections to objects_poses topic
@@ -1290,8 +1354,7 @@ def main():
                 box = detection['box']
                 score = detection['score']
                 class_name = detection['class_name']
-                orientation_angle = detection['orientation_angle']
-                
+
                 # Draw segmentation mask as semi-transparent overlay
                 if 'mask_roi' in detection:
                     mroi = detection['mask_roi']
@@ -1310,9 +1373,6 @@ def main():
                 center_x = (x1 + x2) // 2
                 center_y = (y1 + y2) // 2
                 cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
-                
-                # Draw axis-aligned line with orientation
-                draw_axis_aligned_line(frame, box, orientation_angle)
 
                 # Draw 3D cuboid wireframe if available
                 if 'cuboid_center' in detection:
@@ -1323,6 +1383,13 @@ def main():
                         cam_pos, cam_quat, CAMERA_MATRIX,
                         OPENCV_TO_CAMERA_QUAT,
                         color=(0, 255, 255), thickness=2)
+                    # Draw cuboid orientation axes (LIME=major/long, MAGENTA=minor/short)
+                    draw_cuboid_orientation_axes(
+                        frame, detection['cuboid_center'],
+                        detection['cuboid_quaternion'],
+                        detection['cuboid_dimensions'],
+                        cam_pos, cam_quat, CAMERA_MATRIX,
+                        OPENCV_TO_CAMERA_QUAT)
 
                 # Draw label with confidence and ID (replace spaces with underscores for display)
                 # Use object_name if available (includes ID), otherwise use class_name
