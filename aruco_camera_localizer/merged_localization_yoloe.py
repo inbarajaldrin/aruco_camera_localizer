@@ -725,34 +725,36 @@ def _fit_cuboid_from_silhouette(mask_roi, bx1, by1, camera_matrix,
 
 
 def draw_cuboid_orientation_axes(image, cuboid_center, cuboid_quaternion, cuboid_dimensions,
-                                 cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat):
-    """Draw two orientation axes from the cuboid fit, projected into the image.
+                                 cam_pos, cam_quat, camera_matrix, opencv_to_camera_quat,
+                                 show_major=True, show_minor=True):
+    """Draw orientation axes from the cuboid fit, projected into the image.
 
     - Major axis (larger horizontal dim): LIGHT BLUE (cyan) line + yellow arrowhead
     - Minor axis (smaller horizontal dim): MAGENTA line + yellow arrowhead
-
-    The major axis corresponds to the object yaw (long axis), and the minor
-    axis is the default grasp width direction (short axis / cross-axis).
     """
     dims = np.asarray(cuboid_dimensions, dtype=np.float64)
     rot = R.from_quat(cuboid_quaternion).as_matrix()
     center = np.asarray(cuboid_center, dtype=np.float64)
 
     # dims[0] = w (axis 0), dims[1] = l (axis 1), dims[2] = h (axis 2, vertical)
-    # Determine major/minor among the two horizontal axes
     if dims[0] >= dims[1]:
         major_idx, minor_idx = 0, 1
     else:
         major_idx, minor_idx = 1, 0
 
-    # Build world-space axis endpoints (half-extent along each axis from center)
-    axis_endpoints = []
-    for idx in [major_idx, minor_idx]:
-        direction = rot[:, idx]  # column = axis direction in world
+    # Build world-space axis endpoints for enabled axes
+    axes_to_draw = []  # (index_into_colors, p_pos, p_neg)
+    for i, (idx, enabled) in enumerate([(major_idx, show_major), (minor_idx, show_minor)]):
+        if not enabled:
+            continue
+        direction = rot[:, idx]
         half_len = dims[idx] / 2.0
-        p_pos = center + direction * half_len * 1.5  # extend a bit past the cuboid
+        p_pos = center + direction * half_len * 1.5
         p_neg = center - direction * half_len * 1.5
-        axis_endpoints.append((p_pos, p_neg))
+        axes_to_draw.append((i, p_pos, p_neg))
+
+    if not axes_to_draw:
+        return
 
     # Project to image
     R_wc_inv = R.from_quat(cam_quat).inv().as_matrix()
@@ -773,19 +775,17 @@ def draw_cuboid_orientation_axes(image, cuboid_center, cuboid_quaternion, cuboid
         return
 
     line_colors = [
-        (255, 255, 0),  # LIGHT BLUE (cyan in BGR) = major axis (long axis / object yaw)
-        (255, 0, 255),  # MAGENTA = minor axis (short axis / grasp width)
+        (255, 255, 0),  # LIGHT BLUE (cyan in BGR) = major axis
+        (255, 0, 255),  # MAGENTA = minor axis
     ]
-    arrow_color = (0, 255, 255)  # YELLOW arrowhead for both
-    labels = ['MAJ', 'MIN']
+    arrow_color = (0, 255, 255)  # YELLOW arrowhead
 
-    for i, (p_pos, p_neg) in enumerate(axis_endpoints):
+    for color_idx, p_pos, p_neg in axes_to_draw:
         px_pos = _project_point(p_pos)
         px_neg = _project_point(p_neg)
         if px_pos is None or px_neg is None:
             continue
-        # Draw the full line
-        cv2.line(image, px_neg, px_pos, line_colors[i], 3)
+        cv2.line(image, px_neg, px_pos, line_colors[color_idx], 3)
         # Fixed-size yellow arrowhead (30px) past the line end
         dx = px_pos[0] - center_px[0]
         dy = px_pos[1] - center_px[1]
@@ -793,9 +793,6 @@ def draw_cuboid_orientation_axes(image, cuboid_center, cuboid_quaternion, cuboid
         arrow_end = (int(px_pos[0] + 30 * dx / length),
                      int(px_pos[1] + 30 * dy / length))
         cv2.arrowedLine(image, px_pos, arrow_end, arrow_color, 3, tipLength=0.5)
-        # Label
-        cv2.putText(image, labels[i], (arrow_end[0] + 5, arrow_end[1] - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, line_colors[i], 1)
 
 
 def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, ground_plane_z=None):
@@ -1349,14 +1346,14 @@ def main():
             draw_text(frame, cam_pos, cam_quat, yolo_detected_objects, frame_idx, ee_pos, ee_quat)
             draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, yolo_detected_objects, [])
 
-            # Draw YOLO detections with bounding boxes and axis lines (AFTER all other drawing)
+            # Draw YOLO detections with toggleable overlays (AFTER all other drawing)
             for detection in detection_metadata:
                 box = detection['box']
                 score = detection['score']
                 class_name = detection['class_name']
 
                 # Draw segmentation mask as semi-transparent overlay
-                if 'mask_roi' in detection:
+                if bridge_node.show_seg_mask and 'mask_roi' in detection:
                     mroi = detection['mask_roi']
                     mbx1, mby1, mbx2, mby2 = detection['mask_bbox']
                     overlay = frame.copy()
@@ -1365,44 +1362,45 @@ def main():
                     overlay[mask_full > 0] = (overlay[mask_full > 0] * 0.5 + np.array([128, 0, 255]) * 0.5).astype(np.uint8)
                     frame[:] = overlay
 
-                # Draw bounding box
-                x1, y1, x2, y2 = map(int, box)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
-                # Draw center dot
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
-                cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+                # Draw bounding box + center dot + label
+                if bridge_node.show_bbox:
+                    x1, y1, x2, y2 = map(int, box)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    center_x = (x1 + x2) // 2
+                    center_y = (y1 + y2) // 2
+                    cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+                    # Label with confidence and ID
+                    if 'object_name' in detection:
+                        label = f"{detection['object_name']}: {score:.2f}"
+                    else:
+                        class_name_display = class_name.replace(' ', '_')
+                        label = f"{class_name_display}: {score:.2f}"
+                    label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+                    cv2.rectangle(frame, (x1, y1 - label_size[1] - 8),
+                                (x1 + label_size[0], y1), (0, 255, 0), -1)
+                    cv2.putText(frame, label, (x1, y1 - 4),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                 # Draw 3D cuboid wireframe if available
                 if 'cuboid_center' in detection:
-                    draw_cuboid_wireframe(
-                        frame, detection['cuboid_center'],
-                        detection['cuboid_quaternion'],
-                        detection['cuboid_dimensions'],
-                        cam_pos, cam_quat, CAMERA_MATRIX,
-                        OPENCV_TO_CAMERA_QUAT,
-                        color=(0, 255, 255), thickness=2)
-                    # Draw cuboid orientation axes (LIME=major/long, MAGENTA=minor/short)
-                    draw_cuboid_orientation_axes(
-                        frame, detection['cuboid_center'],
-                        detection['cuboid_quaternion'],
-                        detection['cuboid_dimensions'],
-                        cam_pos, cam_quat, CAMERA_MATRIX,
-                        OPENCV_TO_CAMERA_QUAT)
-
-                # Draw label with confidence and ID (replace spaces with underscores for display)
-                # Use object_name if available (includes ID), otherwise use class_name
-                if 'object_name' in detection:
-                    label = f"{detection['object_name']}: {score:.2f}"
-                else:
-                    class_name_display = class_name.replace(' ', '_')
-                    label = f"{class_name_display}: {score:.2f}"
-                label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-                cv2.rectangle(frame, (x1, y1 - label_size[1] - 8), 
-                            (x1 + label_size[0], y1), (0, 255, 0), -1)
-                cv2.putText(frame, label, (x1, y1 - 4), 
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                    if bridge_node.show_cuboid_wireframe:
+                        draw_cuboid_wireframe(
+                            frame, detection['cuboid_center'],
+                            detection['cuboid_quaternion'],
+                            detection['cuboid_dimensions'],
+                            cam_pos, cam_quat, CAMERA_MATRIX,
+                            OPENCV_TO_CAMERA_QUAT,
+                            color=(0, 255, 255), thickness=2)
+                    # Draw cuboid orientation axes based on toggle flags
+                    if bridge_node.show_major_axis or bridge_node.show_minor_axis:
+                        draw_cuboid_orientation_axes(
+                            frame, detection['cuboid_center'],
+                            detection['cuboid_quaternion'],
+                            detection['cuboid_dimensions'],
+                            cam_pos, cam_quat, CAMERA_MATRIX,
+                            OPENCV_TO_CAMERA_QUAT,
+                            show_major=bridge_node.show_major_axis,
+                            show_minor=bridge_node.show_minor_axis)
 
             # Publish the annotated frame (same as what's displayed in OpenCV window)
             bridge_node.publish_annotated_image(frame)

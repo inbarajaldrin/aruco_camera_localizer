@@ -64,6 +64,23 @@ class LocalizerBridge(Node):
         self.create_service(SetBool, 'yoloe/cross_axis',
                             self._cross_axis_cb)
 
+        # --- Visual marker toggles (defaults: only cuboid wireframe + major axis ON) ---
+        self.show_seg_mask = False
+        self.show_bbox = False
+        self.show_cuboid_wireframe = True
+        self.show_major_axis = True
+        self.show_minor_axis = False
+        self.create_service(SetBool, 'yoloe/visual_markers/seg_mask',
+                            self._toggle_seg_mask_cb)
+        self.create_service(SetBool, 'yoloe/visual_markers/bbox',
+                            self._toggle_bbox_cb)
+        self.create_service(SetBool, 'yoloe/visual_markers/cuboid_wireframe',
+                            self._toggle_cuboid_wireframe_cb)
+        self.create_service(SetBool, 'yoloe/visual_markers/major_axis',
+                            self._toggle_major_axis_cb)
+        self.create_service(SetBool, 'yoloe/visual_markers/minor_axis',
+                            self._toggle_minor_axis_cb)
+
         # Get TCP pose topic from configuration
         tcp_pose_topic = config.get_tcp_pose_topic()
         
@@ -124,9 +141,51 @@ class LocalizerBridge(Node):
 
     def _cross_axis_cb(self, request, response):
         self.use_minor_axis = request.data
+        # Cross-axis flips major/minor visual markers
+        if request.data:
+            self.show_major_axis = False
+            self.show_minor_axis = True
+        else:
+            self.show_major_axis = True
+            self.show_minor_axis = False
         axis_name = "minor (cross-axis)" if request.data else "major (default)"
         response.success = True
         response.message = f"Orientation axis set to {axis_name}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_seg_mask_cb(self, request, response):
+        self.show_seg_mask = request.data
+        response.success = True
+        response.message = f"Seg mask overlay {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_bbox_cb(self, request, response):
+        self.show_bbox = request.data
+        response.success = True
+        response.message = f"Bounding box {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_cuboid_wireframe_cb(self, request, response):
+        self.show_cuboid_wireframe = request.data
+        response.success = True
+        response.message = f"Cuboid wireframe {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_major_axis_cb(self, request, response):
+        self.show_major_axis = request.data
+        response.success = True
+        response.message = f"Major axis marker {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_minor_axis_cb(self, request, response):
+        self.show_minor_axis = request.data
+        response.success = True
+        response.message = f"Minor axis marker {'ON' if request.data else 'OFF'}"
         self.get_logger().info(response.message)
         return response
 
