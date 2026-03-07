@@ -26,10 +26,6 @@ c_vfov = config.get_camera_vfov()
 OPENCV_TO_CAMERA_QUAT = config.get_opencv_to_camera_quaternion()
 print(f"OpenCV-to-Camera quaternion: {OPENCV_TO_CAMERA_QUAT}")
 
-# Detection distance
-DETECTION_DISTANCE = config.get_detection_distance()
-print(f"Detection distance: {DETECTION_DISTANCE}m")
-
 # Ground plane Z offset from config (may be None if not configured for this robot)
 _GROUND_PLANE_Z_CONFIG = config.get_ground_plane_z_offset()
 
@@ -795,7 +791,7 @@ def draw_cuboid_orientation_axes(image, cuboid_center, cuboid_quaternion, cuboid
         cv2.arrowedLine(image, px_pos, arrow_end, arrow_color, 3, tipLength=0.5)
 
 
-def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, distance=0.132, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, ground_plane_z=None):
+def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_prompts, yolo_prompt_map, opencv_to_camera_quat, depth_image=None, bridge_node=None, conf_threshold=0.4, nms_threshold=0.3, ground_plane_z=None):
     """Detect objects using YOLO and convert to world points, grouped by color"""
     detected_color_points = {}
     detection_metadata = []  # Store boxes, orientations, and other metadata
@@ -865,7 +861,7 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                     orientation_angle = None
 
                 # Extract depth from bounding box region (not just center pixel)
-                actual_distance = distance  # Default to config distance
+                actual_distance = None
                 if depth_image is not None:
                     if mask_roi is not None and mask_roi.any():
                         # Sample depth only at segmentation mask pixels (actual object surface)
@@ -918,7 +914,7 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         approx_world = cam_origin_world + ray_world * t_approx
                         _prev_seed = _lookup_prev_cuboid(color_name, approx_world)
 
-                if actual_distance != distance or ground_plane_z is None:
+                if actual_distance is not None or ground_plane_z is None:
                     # Have depth data (or no ground_plane_z configured)
                     # Try 3D cuboid fitting via depth point cloud + PCA
                     if mask_roi is not None and depth_image is not None:
@@ -941,9 +937,13 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
 
                     if cuboid_result is not None:
                         point_world = cuboid_result[0]  # cuboid centroid
-                    else:
+                    elif actual_distance is not None:
                         # Fallback: single ray + median depth (Z-depth interpretation)
                         point_world = cam_origin_world + ray_world * actual_distance
+                    else:
+                        # No depth, no ground plane — place along ray at 0.1m
+                        ray_normalized = ray_world / np.linalg.norm(ray_world)
+                        point_world = cam_origin_world + ray_normalized * 0.1
                 else:
                     # No depth data — try silhouette-based cuboid fitting
                     if mask_roi is not None and ground_plane_z is not None:
@@ -966,16 +966,17 @@ def detect_yolo_blobs(frame, yolo_model, camera_matrix, cam_pos, cam_quat, yolo_
                         if rect_result is not None:
                             point_world = rect_result[0]
                         else:
+                            # Last resort: intersect ray with ground plane
                             if abs(ray_world[2]) > 1e-6:
                                 t = (ground_plane_z - cam_origin_world[2]) / ray_world[2]
                                 if t > 0:
                                     point_world = cam_origin_world + ray_world * t
                                 else:
                                     ray_normalized = ray_world / np.linalg.norm(ray_world)
-                                    point_world = cam_origin_world + ray_normalized * actual_distance
+                                    point_world = cam_origin_world + ray_normalized * 0.1
                             else:
                                 ray_normalized = ray_world / np.linalg.norm(ray_world)
-                                point_world = cam_origin_world + ray_normalized * actual_distance
+                                point_world = cam_origin_world + ray_normalized * 0.1
 
                 # Step 5: Apply calibration offset to object position
                 if bridge_node is not None:
@@ -1198,7 +1199,7 @@ def main():
                 frame, yolo_model, CAMERA_MATRIX, cam_pos, cam_quat,
                 current_prompts, current_prompt_map,
                 OPENCV_TO_CAMERA_QUAT, 
-                distance=DETECTION_DISTANCE, depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3, ground_plane_z=ground_plane_z
+                depth_image=depth_image, bridge_node=bridge_node, conf_threshold=args.yolo_conf, nms_threshold=0.3, ground_plane_z=ground_plane_z
             )
             
             # Convert YOLO detections to object format for objects_poses topic

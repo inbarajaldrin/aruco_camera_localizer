@@ -43,11 +43,8 @@ robots:
         quaternion: [0.0, 0.0, 0.0, 1.0]  # identity (no rotation)
     
     # Detection settings
-    detection:
-      # Distance from camera to place detected objects (meters)
-      # Objects are placed at this distance along the camera's optical axis
-      distance: 0.01  # 10mm default distance
-    
+    detection: {}
+
     # Transform (TF) configuration
     transforms:
       # Default/Home position of end-effector in base frame
@@ -105,9 +102,6 @@ robots:
     
     # Detection settings
     detection:
-      # Distance from camera to place detected objects (meters)
-      # Objects are placed at this distance along the camera's optical axis
-      distance: 0.132  # 132mm for robosort forward-facing setup
       # Ground plane Z coordinate in arm base frame (BEARING_1) in meters.
       # The arm base sits 91mm above the surface the robot drives on.
       ground_plane_z_offset: -0.091

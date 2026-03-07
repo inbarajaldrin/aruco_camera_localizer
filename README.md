@@ -41,7 +41,6 @@ YOUR_ROS2_WORKSPACE/
 │       │   ├── geometric_functions.py
 │       │   ├── kalman_functions.py
 │       │   ├── localizer_bridge.py
-│       │   ├── merged_localization.py
 │       │   ├── object_frame_definitions.py
 │       │   └── process_stl.py
 │       ├── STL/
@@ -106,15 +105,6 @@ Inside the `LocalizerBridge` class is a set of parameters inside `__init__()`.
 First are `self.cam_offset` for position and quaternion, describing the pose of the camera (focal point) relative to the end-effector (EE). 
 
 Second is a set of initial values for EE pose, to be used if ROS2 fails to update the script with actual values. 
-
-### `merged_localization.py`
-
-`merged_localization.py` is a massive file with many parameters. Listing in current order of appearance:
-
-1. Camera parameters: Image frame height and width, in pixels, plus angular FOV. Distortion coefficient is included. These are specific to the camera hardware used. 
-2. `MARKER_SIZE` is the side length of the ArUco marker used for identifying Jenga blocks.
-3. `BLOCK_*` are the side measures of the Jenga blocks. 
-4. `TARGET_POSES` are the goal position and orientation for all objects.
 
 ### `object_frame_definitions.py`
 

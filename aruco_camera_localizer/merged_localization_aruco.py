@@ -28,10 +28,6 @@ c_vfov = config.get_camera_vfov()
 OPENCV_TO_CAMERA_QUAT = config.get_opencv_to_camera_quaternion()
 print(f"OpenCV-to-Camera quaternion: {OPENCV_TO_CAMERA_QUAT}")
 
-# Detection distance
-DETECTION_DISTANCE = config.get_detection_distance()
-print(f"Detection distance: {DETECTION_DISTANCE}m")
-
 fx = c_width / (2 * np.tan(np.deg2rad(c_hfov / 2)))
 print(f"Calculated fx as {fx}")
 

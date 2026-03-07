@@ -105,8 +105,8 @@ class OpenCVToBaseTransform:
         # 2D orientation angle for object
         self.orientation_angle_2d = orientation_angle_2d
         
-        # Detection distance (from config)
-        self.detection_distance = ROBOT_CONFIG['detection']['distance']
+        # Detection distance (default 0.1m, override with --distance CLI arg)
+        self.detection_distance = ROBOT_CONFIG.get('detection', {}).get('distance', 0.1)
     
     def _calculate_camera_to_ee_offset(self):
         """

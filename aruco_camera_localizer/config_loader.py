@@ -85,10 +85,6 @@ class RobotConfig:
         return np.array(self._config['camera']['opencv_to_camera']['quaternion'])
     
     # ========== Detection Configuration ==========
-    
-    def get_detection_distance(self):
-        """Get detection distance from camera (meters)"""
-        return self._config['detection']['distance']
 
     def get_ground_plane_z_offset(self):
         """Get ground plane Z offset in arm base frame (meters), or None if not configured"""
