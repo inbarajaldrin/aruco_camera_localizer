@@ -5,7 +5,7 @@
 # ACTIVE ROBOT SELECTION
 # ============================================================================
 # Select which robot configuration to use: 'ur5e' or 'robosort'
-active_robot: 'robosort'
+active_robot: 'so_arm101'
 
 # ============================================================================
 # ROBOT CONFIGURATIONS
@@ -120,6 +120,55 @@ robots:
         quaternion: [0.0, 0.0, 0.0, 1.0]  # [x, y, z, w] - identity
       
       # Calibration offsets for fine-tuning object positions (meters)
+      calibration_offset:
+        x: 0.0
+        y: 0.0
+        z: 0.0
+
+  # --------------------------------------------------------------------------
+  # SO-ARM101 Robot Configuration
+  # --------------------------------------------------------------------------
+  so_arm101:
+    # ROS Topics
+    topics:
+      # Expected message type: geometry_msgs/msg/PoseStamped
+      # Published by ee_pose_publisher (base -> gripper TF)
+      tcp_pose: '/ee_pose'
+
+    # Camera parameters (wrist-mounted USB camera)
+    camera:
+      # Camera resolution (pixels)
+      width: 1280
+      height: 720
+
+      # Field of view (degrees) — 100° HFOV, square pixels
+      horizontal_fov: 100.0
+      vertical_fov: 67.7
+
+      # OpenCV frame to Camera frame transformation
+      # camera_link uses SDF convention: +X=forward, +Y=left, +Z=up
+      # Derived from LINK_TO_OPENCV.T quaternion
+      opencv_to_camera:
+        quaternion: [0.5, -0.5, 0.5, -0.5]
+
+    # Detection settings
+    detection:
+      # Ground plane Z in base frame (fixed-base arm, legos at Z~0)
+      ground_plane_z_offset: 0.0
+
+    # Transform (TF) configuration
+    transforms:
+      # Default/Home position of end-effector in base frame (at grasp home: wrist_flex=pi/2)
+      ee_default:
+        position: [0.232134, -0.000177, 0.173270]
+        quaternion: [0.000003, -0.000003, -0.024334, 0.999704]
+
+      # Default camera_link pose in base frame (at grasp home)
+      camera_default:
+        position: [0.237418, 0.061989, 0.162003]
+        quaternion: [-0.581167, 0.606593, 0.376952, 0.390124]
+
+      # Calibration offsets for fine-tuning (meters)
       calibration_offset:
         x: 0.0
         y: 0.0
