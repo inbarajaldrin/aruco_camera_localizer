@@ -25,9 +25,10 @@ class LocalizerBridge(Node):
         self.ee_position = None
         self.ee_quat = None
         self.ee_pose_received = False
-        self.ee_speed = 0.0  # mm/s
+        self.ee_speed = 0.0  # mm/s (EMA-filtered)
         self._prev_ee_pos = None
         self._prev_ee_time = None
+        self._speed_ema_alpha = 0.1  # low alpha = heavy smoothing
         self.lock = threading.Lock()
         self.image_lock = threading.Lock()
         self.latest_frame = None
@@ -101,7 +102,9 @@ class LocalizerBridge(Node):
             if self._prev_ee_pos is not None and self._prev_ee_time is not None:
                 dt = t - self._prev_ee_time
                 if dt > 0:
-                    self.ee_speed = np.linalg.norm(new_pos - self._prev_ee_pos) / dt * 1000.0  # mm/s
+                    raw_speed = np.linalg.norm(new_pos - self._prev_ee_pos) / dt * 1000.0  # mm/s
+                    a = self._speed_ema_alpha
+                    self.ee_speed = a * raw_speed + (1 - a) * self.ee_speed
             self._prev_ee_pos = new_pos
             self._prev_ee_time = t
             self.ee_position = new_pos

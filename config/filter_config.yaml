@@ -41,8 +41,8 @@ snap_tilt_threshold: 10.0  # degrees — skip snap if tilt exceeds this
 
 # Pause detection when robot is moving fast
 enable_motion_pause: true
-motion_speed_threshold: 20.0  # mm/s
-motion_pause_holdover: 1  # frames to wait after speed drops before resuming
+motion_speed_threshold: 15.0  # mm/s
+motion_pause_holdover: 0  # frames to wait after speed drops before resuming
 
 # IPPE disambiguation: pick the IPPE solution closest to table-resting orientation
 enable_ippe_disambiguation: true
