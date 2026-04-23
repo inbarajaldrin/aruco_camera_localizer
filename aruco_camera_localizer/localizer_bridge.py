@@ -123,16 +123,52 @@ class LocalizerBridge(Node):
         # Note: /camera_pose is published by external package, we only subscribe
         self.annotated_image_publisher = self.create_publisher(Image, 'camera_annotated', 10)
         self.bridge = CvBridge()
-        
+
         # Use RELIABLE QoS
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             depth=10
         )
-        self.object_poses_pub = self.create_publisher(TFMessage, '/objects_poses', qos_profile)
-        self.aruco_poses_pub = self.create_publisher(TFMessage, '/aruco_poses', qos_profile)
-        self.drop_poses_pub = self.create_publisher(TFMessage, '/drop_poses', qos_profile)
-        
+
+        # Topic names overridable via ROS parameters so the same binary can
+        # populate either control_gui's sim topology (/objects_poses_sim /
+        # /objects_bbox_sim) or its real topology (/objects_poses_real /
+        # /objects_bbox_real), or the historic bare /objects_poses on legacy
+        # setups. Default preserves the pre-2026-04 behaviour.
+        self.declare_parameter('objects_poses_topic', '/objects_poses')
+        self.declare_parameter('aruco_poses_topic', '/aruco_poses')
+        self.declare_parameter('drop_poses_topic', '/drop_poses')
+        self.declare_parameter('objects_bbox_topic', '/objects_bbox')
+        self.declare_parameter('objects_bbox_catalog', '')  # '' = auto-find config/bbox_catalog.json
+        self.declare_parameter('objects_bbox_rate_hz', 1.0)
+        objects_poses_topic = str(self.get_parameter('objects_poses_topic').value)
+        aruco_poses_topic = str(self.get_parameter('aruco_poses_topic').value)
+        drop_poses_topic = str(self.get_parameter('drop_poses_topic').value)
+        objects_bbox_topic = str(self.get_parameter('objects_bbox_topic').value)
+        bbox_catalog_path = str(self.get_parameter('objects_bbox_catalog').value)
+        bbox_rate_hz = float(self.get_parameter('objects_bbox_rate_hz').value)
+
+        self.object_poses_pub = self.create_publisher(TFMessage, objects_poses_topic, qos_profile)
+        self.aruco_poses_pub = self.create_publisher(TFMessage, aruco_poses_topic, qos_profile)
+        self.drop_poses_pub = self.create_publisher(TFMessage, drop_poses_topic, qos_profile)
+        self.objects_bbox_pub = self.create_publisher(String, objects_bbox_topic, 1)
+
+        # Load known-object bounding-box catalog (JSON: {name: {sx, sy, sz}} in meters).
+        # Published verbatim as /objects_bbox at bbox_rate_hz so control_gui's
+        # TCP-offset planner has the same data in real mode as in sim mode.
+        self._bbox_payload = self._load_bbox_catalog(bbox_catalog_path)
+        if self._bbox_payload and bbox_rate_hz > 0:
+            self.create_timer(1.0 / bbox_rate_hz, self._publish_bbox_tick)
+            self.get_logger().info(
+                f"Publishing {objects_bbox_topic} @ {bbox_rate_hz:g} Hz "
+                f"({len(self._bbox_payload)} objects from catalog)"
+            )
+        else:
+            self.get_logger().info(
+                f"No bbox catalog loaded; {objects_bbox_topic} will not publish. "
+                "Set objects_bbox_catalog to a JSON path to enable."
+            )
+
 
     def publish_annotated_image(self, frame):
         """Publish the annotated/processed frame that's displayed in OpenCV window"""
@@ -368,3 +404,53 @@ class LocalizerBridge(Node):
         # Publish the TF message to /drop_poses
         self.drop_poses_pub.publish(msg)
 
+
+    # ---- 2026-04-23 (Phase 6-05): object-size catalog + /objects_bbox publisher ----
+    def _load_bbox_catalog(self, explicit_path: str):
+        """Load {name: {sx, sy, sz}} from JSON. Returns {} on any failure
+        (caller checks and skips publishing). Explicit path wins; otherwise
+        look in the package share dir for config/bbox_catalog.json."""
+        import json
+        import os
+        if explicit_path:
+            path = explicit_path
+        else:
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                path = os.path.join(
+                    get_package_share_directory('aruco_camera_localizer'),
+                    'config', 'bbox_catalog.json',
+                )
+            except Exception:
+                return {}
+        try:
+            with open(path, 'r') as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            self.get_logger().info(
+                f"objects_bbox_catalog {path!r} not found (optional — no bbox publishing)"
+            )
+            return {}
+        except Exception as exc:
+            self.get_logger().warn(
+                f"failed to parse objects_bbox_catalog {path!r}: {exc}"
+            )
+            return {}
+        # Coerce to the exact shape control_gui._bbox_callback expects.
+        cleaned = {}
+        for name, d in raw.items():
+            if not isinstance(d, dict):
+                continue
+            try:
+                cleaned[name] = {
+                    'sx': float(d.get('sx', 0.0)),
+                    'sy': float(d.get('sy', 0.0)),
+                    'sz': float(d.get('sz', 0.0)),
+                }
+            except (TypeError, ValueError):
+                continue
+        return cleaned
+
+    def _publish_bbox_tick(self):
+        import json
+        self.objects_bbox_pub.publish(String(data=json.dumps(self._bbox_payload)))
