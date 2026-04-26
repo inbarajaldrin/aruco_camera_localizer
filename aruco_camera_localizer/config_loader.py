@@ -89,6 +89,22 @@ class RobotConfig:
     def get_ground_plane_z_offset(self):
         """Get ground plane Z offset in arm base frame (meters), or None if not configured"""
         return self._config['detection'].get('ground_plane_z_offset', None)
+
+    def get_yolo_config(self):
+        """Get YOLO detection config for the active robot, or empty dict if not configured.
+
+        Returns a dict with optional keys:
+          - prompts:     list[str]     text prompts fed to YOLOE (e.g. ['red object', ...])
+          - prompt_map:  dict[str,str] class_name → color_name renames
+                                       (e.g. {'red object': 'red'})
+          - confidence:  float         YOLOE confidence threshold (overrides --yolo-conf default)
+
+        Per-robot YOLO vocabulary lives next to active_robot so each
+        physical setup can ship its own color set without CLI repetition.
+        Mirrors how cup ArUco offsets live in aruco_config.json's per-robot
+        block. CLI args (--yolo-prompts, --yolo-conf) still override this.
+        """
+        return dict(self._config.get('detection', {}).get('yolo', {}))
     
     # ========== Transform Configuration ==========
     

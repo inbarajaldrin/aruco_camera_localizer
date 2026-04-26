@@ -138,10 +138,12 @@ robots:
     # Camera parameters (wrist-mounted USB camera)
     camera:
       # Camera resolution (pixels)
+      # Matches what the active-viewport publisher actually emits (1280x720)
+      # AND the real RealSense — sim and real now share the same intrinsics.
       width: 1280
       height: 720
 
-      # Field of view (degrees) — 100° HFOV, square pixels
+      # Field of view (degrees) — 100° HFOV, square pixels (matches sim and real lens)
       horizontal_fov: 100.0
       vertical_fov: 67.7
 
@@ -155,6 +157,29 @@ robots:
     detection:
       # Ground plane Z in base frame (fixed-base arm, legos at Z~0)
       ground_plane_z_offset: 0.0
+
+      # YOLOE detection vocabulary for this robot's color-sort task.
+      # Used by localize_yoloe as the default prompt set when no CLI
+      # --yolo-prompts is provided. CLI args still override.
+      #
+      # prompts:    text prompts fed to YOLOE (CLIP-style text embeddings).
+      #             "object" not "lego" — broader prior, but with map below
+      #             child_frame_ids reduce to short color names downstream.
+      # prompt_map: class_name → color_name rename. Result: detected
+      #             "red object" publishes as child_frame_id "red_<idx>"
+      #             instead of "red_object_<idx>". Cleaner downstream
+      #             matching against bbox catalog and color helpers.
+      # confidence: YOLOE confidence threshold (overrides --yolo-conf default).
+      yolo:
+        prompts:
+          - red object
+          - blue object
+          - green object
+        prompt_map:
+          red object: red
+          blue object: blue
+          green object: green
+        confidence: 0.25
 
     # Transform (TF) configuration
     transforms:

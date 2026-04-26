@@ -14,6 +14,7 @@ import rclpy
 import argparse
 import json
 import os
+import sys
 from ament_index_python.packages import get_package_share_directory
 
 # Load configuration from YAML
@@ -36,7 +37,7 @@ print(f"Calculated fy as {fy}")
 
 CAMERA_MATRIX = config.get_camera_matrix()
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.032  # meters
+MARKER_SIZE = 0.025  # meters — SO-ARM101 cup markers are 25mm (per soarm101-dt CUP_ARUCO_CONFIG.marker_size_m)
 BLOCK_LENGTH = 0.072 # meters
 BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
@@ -48,7 +49,9 @@ ARUCO_DICTS = {
 trackers = {}
 
 def start_ros_node(camera_topic='/camera/image_raw'):
-    rclpy.init()
+    # Pass sys.argv explicitly so rclpy parses `--ros-args -p name:=value`
+    # parameter overrides (used by callers to remap drop_poses_topic, etc).
+    rclpy.init(args=sys.argv)
     node = LocalizerBridge(camera_topic=camera_topic, depth_topic=None)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
@@ -64,7 +67,12 @@ def parse_args():
                         help="Prevents console prints. Otherwise, prints object positions in both camera frame and base frame.")
     parser.add_argument("--drop", action='store_true',
                         help="Publish drop poses instead of ArUco poses. Drop poses are calculated from position offsets in aruco_config.json transformed to world frame.")
-    return parser.parse_args()
+    parser.add_argument("--robot", type=str, default=None,
+                        help="Robot config to use from aruco_config.json (e.g., 'jetank', 'so_arm101'). "
+                             "Overrides active_robot field in config.")
+    # parse_known_args lets ROS2 own --ros-args (params, remaps).
+    args, _ = parser.parse_known_args()
+    return args
 
 def pick_closest_blob(blobs, last_position):
     if not blobs:
@@ -77,7 +85,7 @@ def pick_closest_blob(blobs, last_position):
     return blobs[closest_idx]
 
 
-def load_aruco_config():
+def load_aruco_config(robot: str = None):
     """Load aruco_config.json and create a mapping from marker_id to row and offset"""
     # Try to get package share directory, fall back to relative path (same pattern as config_loader)
     try:
@@ -87,18 +95,60 @@ def load_aruco_config():
         # Fallback for development/testing
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         config_path = os.path.join(pkg_dir, "config", "aruco_config.json")
-    
+
     with open(config_path, 'r') as f:
         aruco_config = json.load(f)
-    
-    # Create mapping: marker_id -> (row_name, offset_dict)
+
+    # Multi-robot support: if "robots" key exists, select the active robot's config
+    if "robots" in aruco_config:
+        active = robot if robot else aruco_config.get("active_robot", "jetank")
+        robot_cfg = aruco_config["robots"].get(active)
+        if robot_cfg is None:
+            raise KeyError(f"Robot '{active}' not found in aruco_config.json robots dict")
+        marker_rows = robot_cfg["marker_rows"]
+    else:
+        # Backward compat: old flat format (JETANK-only aruco_config.json)
+        marker_rows = aruco_config["marker_rows"]
+
+    # Create mapping: marker_id -> (row_name, offset_dict, orient_quat_or_None)
+    # Each row declares marker→object via one of:
+    #   1. marker_to_object: {method, params}  — preferred. Returns BOTH a
+    #      position offset and an orientation quaternion that converts from
+    #      marker frame to object body frame. The orientation rotation is
+    #      essential for mesh-based collision objects (cups, boxes) so the
+    #      object's local axes align with world correctly — without it, the
+    #      mesh would be drawn in the marker's frame (e.g., cup laying on
+    #      its side instead of upright).
+    #   2. position_offset: {X, Y, Z}          — legacy fallback. Position
+    #      only, no orientation correction. Kept for jetank rows that
+    #      haven't migrated yet (rows where the published quat IS the
+    #      marker quat by design).
+    # If both are present, marker_to_object wins.
+    from aruco_camera_localizer.marker_geometry import compute_marker_to_object_offset
     marker_to_row = {}
-    for row_name, row_data in aruco_config["marker_rows"].items():
+    for row_name, row_data in marker_rows.items():
         marker_ids = row_data["marker_ids"]
-        offset = row_data["position_offset"]
+        orient_quat = None  # None => use marker quat directly (legacy behavior)
+        if "marker_to_object" in row_data:
+            mto = row_data["marker_to_object"]
+            result = compute_marker_to_object_offset(mto["method"], mto["params"])
+            offset = result['offset']
+            orient_quat = result.get('orientation_quat_marker_to_object')
+            print(f"  [{row_name}] marker_to_object via {mto['method']}: "
+                  f"offset_mm=({offset['X']*1000:+.2f},{offset['Y']*1000:+.2f},{offset['Z']*1000:+.2f}), "
+                  f"orient_quat={orient_quat}")
+        elif "position_offset" in row_data:
+            offset = row_data["position_offset"]
+            print(f"  [{row_name}] legacy position_offset: "
+                  f"offset_mm=({offset['X']*1000:+.2f},{offset['Y']*1000:+.2f},{offset['Z']*1000:+.2f})  "
+                  f"(no orientation correction — published quat = marker quat)")
+        else:
+            raise KeyError(
+                f"Row '{row_name}' in aruco_config has neither "
+                f"'marker_to_object' nor 'position_offset' — at least one is required.")
         for marker_id in marker_ids:
-            marker_to_row[marker_id] = (row_name, offset)
-    
+            marker_to_row[marker_id] = (row_name, offset, orient_quat)
+
     return marker_to_row
 
 def transform_offset_marker_to_world(offset_marker, marker_world_pos, marker_world_quat):
@@ -130,7 +180,7 @@ def main():
     # Load aruco config if --drop mode is enabled
     marker_to_row = None
     if args.drop:
-        marker_to_row = load_aruco_config()
+        marker_to_row = load_aruco_config(robot=args.robot)
         print(f"Loaded ArUco config for drop mode. Found {len(marker_to_row)} marker mappings.")
     
     # Determine if using ROS topic or camera ID
@@ -246,23 +296,32 @@ def main():
                 if marker_stabilities[marker_id]["confirmed"]:
                     # Check if this marker has a drop pose configuration
                     if marker_id in marker_to_row:
-                        row_name, offset_dict = marker_to_row[marker_id]
+                        row_name, offset_dict, orient_quat_m_to_obj = marker_to_row[marker_id]
                         # Get marker world pose
                         tvec, rvec = kalman_filters[marker_id].predict()
                         rquat = rvec_to_quat(rvec)
                         marker_world_pos = transform_point_cam_to_world(tvec, cam_pos, cam_quat)
                         marker_world_rot = transform_orientation_cam_to_world(rquat, cam_quat)
-                        
+
                         # Convert offset from dict to numpy array [X, Y, Z]
                         offset_marker = np.array([offset_dict["X"], offset_dict["Y"], offset_dict["Z"]])
-                        
+
                         # Transform offset from marker frame to world frame
                         drop_pos_world = transform_offset_marker_to_world(
                             offset_marker, marker_world_pos, marker_world_rot
                         )
-                        
-                        # Use marker orientation for drop pose (or identity if you prefer)
-                        drop_quat = marker_world_rot
+
+                        # Drop ORIENTATION: if the row's marker_to_object provides a
+                        # marker→object_body rotation, apply it. Otherwise (legacy
+                        # rows like jetank's), publish marker orientation as drop
+                        # orientation — same behavior as before.
+                        # R_obj_to_world = R_marker_to_world * R_marker_to_object_body
+                        if orient_quat_m_to_obj is not None:
+                            r_marker_w = R.from_quat(marker_world_rot)
+                            r_m_to_obj = R.from_quat(orient_quat_m_to_obj)
+                            drop_quat = (r_marker_w * r_m_to_obj).as_quat()
+                        else:
+                            drop_quat = marker_world_rot
                         
                         drop_poses.append({
                             "name": f"drop_{marker_id}",

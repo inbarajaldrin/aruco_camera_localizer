@@ -12,6 +12,7 @@ import rclpy
 import argparse
 import json
 import os
+import sys
 from ultralytics import YOLOE
 
 # Load configuration from YAML
@@ -108,7 +109,9 @@ trackers = {}
 previous_yolo_objects = {}  # color_name -> list of {name, position}
 
 def start_ros_node(camera_topic='/camera/image_raw', depth_topic=None):
-    rclpy.init()
+    # Pass sys.argv explicitly so rclpy parses `--ros-args -p name:=value`
+    # parameter overrides (used to remap objects_poses_topic etc).
+    rclpy.init(args=sys.argv)
     node = LocalizerBridge(camera_topic=camera_topic, depth_topic=depth_topic)
     thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     thread.start()
@@ -1068,15 +1071,43 @@ def main():
     
     prompts_timer = bridge_node.create_timer(1.0, publish_current_prompts)
 
-    # Parse prompt mapping from command line if provided
+    # Per-robot YOLO config (from robot_config.yaml `detection.yolo` block).
+    # CLI args take precedence — the config is only consulted when --yolo-prompts
+    # was left at its default (["hand"]) and/or --yolo-prompt-map was not given.
+    # This lets each robot define its own color vocabulary without per-launch
+    # CLI repetition, matching how cup ArUco offsets live in aruco_config.json's
+    # per-robot block.
+    robot_yolo_cfg = config.get_yolo_config()
+
+    # Resolve prompts: CLI > config > default ["hand"].
+    if args.yolo_prompts == ["hand"] and robot_yolo_cfg.get('prompts'):
+        resolved_prompts = list(robot_yolo_cfg['prompts'])
+        print(f"YOLO prompts from robot config: {resolved_prompts}")
+    else:
+        resolved_prompts = args.yolo_prompts
+
+    # Resolve prompt_map: CLI override > config > YOLO_PROMPT_MAP default.
     yolo_prompt_map = YOLO_PROMPT_MAP.copy()
     if args.yolo_prompt_map:
         for mapping in args.yolo_prompt_map:
             if ':' in mapping:
                 prompt, color = mapping.split(':', 1)
                 yolo_prompt_map[prompt] = color.strip()
-    
-    # Update global variables with command line arguments
+    elif robot_yolo_cfg.get('prompt_map'):
+        yolo_prompt_map.update(robot_yolo_cfg['prompt_map'])
+        print(f"YOLO prompt_map from robot config: {robot_yolo_cfg['prompt_map']}")
+
+    # Resolve confidence: CLI > config > argparse default (0.4).
+    # argparse default is 0.4 — if user kept it AND config supplies a value, use config.
+    if args.yolo_conf == 0.4 and 'confidence' in robot_yolo_cfg:
+        args.yolo_conf = float(robot_yolo_cfg['confidence'])
+        print(f"YOLO confidence from robot config: {args.yolo_conf}")
+
+    # Mirror resolved prompts back into args so downstream code (cache key
+    # generation at L1109, etc.) sees the effective list.
+    args.yolo_prompts = resolved_prompts
+
+    # Update global variables with resolved values
     update_yolo_prompts(args.yolo_prompts, yolo_prompt_map)
 
     # Initialize YOLO model with dynamic prompts using improved loading

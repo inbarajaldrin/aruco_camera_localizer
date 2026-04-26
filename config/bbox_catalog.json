@@ -1,7 +1,11 @@
 {
-  "_comment": "Known object bounding boxes for aruco_camera_localizer. Keys are object names as they will appear in TFMessage.child_frame_id on /objects_poses. Values are full-extent dimensions (meters) along the object's local X/Y/Z axes. control_gui's _bbox_callback consumes this as {name: {sx, sy, sz}} for TCP-offset grasp planning. Match this catalog to the sim side (sim_ground_truth/config/lego_world_objects.yaml) so sim and real datasets give the same per-object dimensions.",
+  "_comment": "Known object bounding boxes for aruco_camera_localizer. Keys are object names as they will appear in TFMessage.child_frame_id on /objects_poses. Values are full-extent dimensions (meters) along the object's local X/Y/Z axes. control_gui's _bbox_callback consumes this as {name: {sx, sy, sz}} for TCP-offset grasp planning. Match this catalog to the sim side (sim_ground_truth/config/lego_world_objects.yaml) so sim and real datasets give the same per-object dimensions. Color-only entries ('red', 'green', 'blue') are color-prefix fallbacks for YOLOE's short-name TFs (e.g. 'red_0', 'red_1') after the prompt_map rename in robot_config.yaml — control_gui's _lookup_bbox tries exact match first, falls back to color prefix on miss.",
 
   "red_lego_2x4":   {"sx": 0.032, "sy": 0.016, "sz": 0.011},
   "green_lego_2x3": {"sx": 0.024, "sy": 0.016, "sz": 0.011},
-  "blue_lego_2x2":  {"sx": 0.016, "sy": 0.016, "sz": 0.011}
+  "blue_lego_2x2":  {"sx": 0.016, "sy": 0.016, "sz": 0.011},
+
+  "red":   {"sx": 0.032, "sy": 0.016, "sz": 0.011},
+  "green": {"sx": 0.024, "sy": 0.016, "sz": 0.011},
+  "blue":  {"sx": 0.016, "sy": 0.016, "sz": 0.011}
 }

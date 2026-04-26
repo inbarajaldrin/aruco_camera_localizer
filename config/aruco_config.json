@@ -1,30 +1,52 @@
 {
   "_comment": "position_offset values are in ArUco marker axis frame of reference",
-  "marker_rows": {
-    "top": {
-      "marker_ids": [1, 4, 7, 10, 13],
-      "position_offset": {
-        "X": 0.0,
-        "Y": -0.15,
-        "Z": 0.15
+  "active_robot": "so_arm101",
+  "robots": {
+    "jetank": {
+      "marker_rows": {
+        "top": {
+          "marker_ids": [1, 4, 7, 10, 13],
+          "position_offset": {
+            "X": 0.0,
+            "Y": -0.15,
+            "Z": 0.15
+          }
+        },
+        "middle": {
+          "marker_ids": [2, 5, 8, 11, 14],
+          "position_offset": {
+            "X": 0.0,
+            "Y": -0.095,
+            "Z": 0.1
+          }
+        },
+        "bottom": {
+          "marker_ids": [3, 6, 9, 12, 15],
+          "position_offset": {
+            "X": 0.0,
+            "Y": -0.025,
+            "Z": 0.05
+          }
+        }
       }
     },
-    "middle": {
-      "marker_ids": [2, 5, 8, 11, 14],
-      "position_offset": {
-        "X": 0.0,
-        "Y": -0.095,
-        "Z": 0.1
-      }
-    },
-    "bottom": {
-      "marker_ids": [3, 6, 9, 12, 15],
-      "position_offset": {
-        "X": 0.0,
-        "Y": -0.025,
-        "Z": 0.05
+    "so_arm101": {
+      "marker_rows": {
+        "cups": {
+          "_comment": "Sorting cups (red=0, green=1, blue=2). 25mm marker on side wall, 39mm cup outer radius, 96.5mm cup body height, marker centered at 45% of cup height, marker mesh inset 6mm into cup wall. The marker_to_object block declares the geometry; aruco_camera_localizer's marker_geometry module computes the offset = (X=0, Y=+0.00483, Z=-0.033) m at runtime. Y is POSITIVE here because ArUco PnP convention has marker local Y axis = UP on object (cup body center is above marker, so positive Y in marker frame). Verified against sim USD ground truth (cup_center - marker_center = -32.55mm in Y world, +4.83mm in Z world, 2026-04-25).",
+          "marker_ids": [0, 1, 2],
+          "marker_to_object": {
+            "method": "cylinder_side_marker",
+            "params": {
+              "object_radius_m": 0.039,
+              "object_height_m": 0.0965,
+              "marker_height_pct": 0.45,
+              "marker_inset_m": 0.006,
+              "marker_y_axis": "up"
+            }
+          }
+        }
       }
     }
   }
 }
-
