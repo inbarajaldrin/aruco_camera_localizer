@@ -81,6 +81,28 @@ class LocalizerBridge(Node):
         self.create_service(SetBool, 'yoloe/visual_markers/minor_axis',
                             self._toggle_minor_axis_cb)
 
+        # --- Merged-viewer overlay toggles (consumed by localize_aruco's cv2 window). ---
+        # aruco_overlay = the ArUco-drawn pixels (markers + text + object lines).
+        # yoloe_overlay = use the YOLOE-rendered frame as the base instead of raw.
+        self.aruco_overlay_enable = True
+        self.yoloe_overlay_enable = True
+        self.create_service(SetBool, 'aruco_viewer/aruco_overlay_enable',
+                            self._toggle_aruco_overlay_cb)
+        self.create_service(SetBool, 'aruco_viewer/yoloe_overlay_enable',
+                            self._toggle_yoloe_overlay_cb)
+
+        # --- YOLOE-annotated image cross-process channel ---
+        # localize_yoloe already renders bbox + cuboid wireframe + orientation
+        # axes per frame. We just route its annotated stream to a separate
+        # topic and cache the latest frame so localize_aruco's merged window
+        # can use it as the display base. Decoupled via topic so a yoloe
+        # restart doesn't crash the aruco viewer.
+        self._yoloe_annotated_frame = None
+        self._yoloe_annotated_stamp_ns = 0
+        self._yoloe_annotated_lock = threading.Lock()
+        self.create_subscription(Image, 'yoloe_annotated',
+                                 self._yoloe_annotated_cb, 10)
+
         # Get TCP pose topic from configuration
         tcp_pose_topic = config.get_tcp_pose_topic()
         
@@ -121,7 +143,12 @@ class LocalizerBridge(Node):
         
         # --- Publishers ---
         # Note: /camera_pose is published by external package, we only subscribe
-        self.annotated_image_publisher = self.create_publisher(Image, 'camera_annotated', 10)
+        # annotated_image_topic is overridable so the yoloe process can publish
+        # its rich-overlay frame to /yoloe_annotated while aruco owns the
+        # canonical /camera_annotated merged stream.
+        self.declare_parameter('annotated_image_topic', 'camera_annotated')
+        annotated_topic = str(self.get_parameter('annotated_image_topic').value)
+        self.annotated_image_publisher = self.create_publisher(Image, annotated_topic, 10)
         self.bridge = CvBridge()
 
         # Use RELIABLE QoS
@@ -224,6 +251,40 @@ class LocalizerBridge(Node):
         response.message = f"Minor axis marker {'ON' if request.data else 'OFF'}"
         self.get_logger().info(response.message)
         return response
+
+    def _toggle_aruco_overlay_cb(self, request, response):
+        self.aruco_overlay_enable = request.data
+        response.success = True
+        response.message = f"ArUco overlay {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _toggle_yoloe_overlay_cb(self, request, response):
+        self.yoloe_overlay_enable = request.data
+        response.success = True
+        response.message = f"YOLOE overlay {'ON' if request.data else 'OFF'}"
+        self.get_logger().info(response.message)
+        return response
+
+    def _yoloe_annotated_cb(self, msg: Image):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as e:
+            self.get_logger().warn(f"yoloe_annotated decode failed: {e}")
+            return
+        with self._yoloe_annotated_lock:
+            self._yoloe_annotated_frame = frame
+            self._yoloe_annotated_stamp_ns = self.get_clock().now().nanoseconds
+
+    def get_yoloe_annotated_frame(self, max_age_s: float = 1.5):
+        """Return the cached YOLOE-annotated frame if fresh, else None."""
+        with self._yoloe_annotated_lock:
+            if self._yoloe_annotated_frame is None:
+                return None
+            age_ns = self.get_clock().now().nanoseconds - self._yoloe_annotated_stamp_ns
+            if age_ns > max_age_s * 1e9:
+                return None
+            return self._yoloe_annotated_frame.copy()
 
     def ee_pose_callback(self, msg: PoseStamped):
         with self.lock:

@@ -253,6 +253,10 @@ def main():
                 break
 
         frame_idx += 1
+        # Pristine snapshot taken before any drawing — used as the display base
+        # when the ArUco overlay is toggled OFF, so we can suppress the per-marker
+        # axes/text without losing pose computation.
+        frame_raw = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         identified_aruco = []
@@ -342,10 +346,25 @@ def main():
         draw_text(frame, cam_pos, cam_quat, identified_objects+identified_aruco, frame_idx, ee_pos, ee_quat)
         draw_object_lines(frame, CAMERA_MATRIX, cam_pos, cam_quat, identified_objects+identified_aruco, [])
 
-        # Publish the annotated frame
-        bridge_node.publish_annotated_image(frame)
-        
-        cv2.imshow("Merged Detection", frame)
+        # Compose the merged display. When the YOLOE overlay is enabled, use
+        # the YOLOE-rendered frame as the base — that frame already carries
+        # bbox + 3D cuboid wireframe + orientation axes drawn by the YOLOE
+        # process. When the ArUco overlay is enabled, layer ArUco's drawn
+        # pixels on top by diffing the pose-estimated frame against the raw
+        # snapshot — this captures everything `estimate_pose`, `draw_text`,
+        # and `draw_object_lines` mutated, in one shot.
+        if bridge_node.yoloe_overlay_enable:
+            yoloe_base = bridge_node.get_yoloe_annotated_frame()
+            display = yoloe_base if yoloe_base is not None else frame_raw.copy()
+        else:
+            display = frame_raw.copy()
+        if bridge_node.aruco_overlay_enable:
+            aruco_pixels = (frame != frame_raw).any(axis=-1)
+            display[aruco_pixels] = frame[aruco_pixels]
+
+        bridge_node.publish_annotated_image(display)
+
+        cv2.imshow("Merged Detection", display)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
