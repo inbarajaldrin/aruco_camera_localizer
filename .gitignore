@@ -1,3 +1,13 @@
 *.webm
 mobileclip_blt.ts
 __pycache__/
+
+# YOLOE text-embeddings cache — regenerated automatically by
+# merged_localization_yoloe.py from the prompt list (key = hash of
+# args.yolo_prompts). Different prompt set → different hash → different
+# file. Never check in: would create churn on every prompt change.
+# Flagged as a gitignore candidate in the repo's CLAUDE.md.
+.text_embeddings_*.pt
+
+# macOS Finder noise
+.DS_Store
