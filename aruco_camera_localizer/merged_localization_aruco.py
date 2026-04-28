@@ -37,7 +37,7 @@ print(f"Calculated fy as {fy}")
 
 CAMERA_MATRIX = config.get_camera_matrix()
 DIST_COEFFS = np.zeros((5, 1), dtype=np.float32) # datasheet says <= 1.5%
-MARKER_SIZE = 0.025  # meters — SO-ARM101 cup markers are 25mm (per soarm101-dt CUP_ARUCO_CONFIG.marker_size_m)
+MARKER_SIZE = 0.035  # meters — SO-ARM101 cup markers are 35mm (full ArUco square incl. black border; mirrors soarm101-dt CUP_ARUCO_CONFIG.marker_size_m)
 BLOCK_LENGTH = 0.072 # meters
 BLOCK_WIDTH = 0.024 # meters
 BLOCK_THICKNESS = 0.014 # meters
