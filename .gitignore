@@ -1,3 +1,7 @@
 *.webm
 __pycache__/
 mobileclip_blt.ts
+
+# Runtime-cached text embeddings produced by the CLIP/MobileCLIP encoder
+# (content-addressed by prompt hash, regenerated on demand)
+aruco_camera_localizer/.text_embeddings_*
