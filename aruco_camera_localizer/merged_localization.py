@@ -5,7 +5,9 @@ import json
 import time
 from pathlib import Path
 from scipy.spatial.transform import Rotation as R
-from aruco_camera_localizer.camera_selection import detect_available_cameras, select_camera
+from aruco_camera_localizer.camera_selection import (
+    detect_available_cameras, select_camera, probe_camera_by_identity,
+)
 from aruco_camera_localizer.localizer_bridge import LocalizerBridge
 from aruco_camera_localizer.geometric_functions import (
     rvec_to_quat, quat_to_rvec, transform_orientation_cam_to_world,
@@ -500,12 +502,22 @@ def main():
         if args.camera_id is not None:
             cam_id = args.camera_id
         else:
-            available = detect_available_cameras()
-            if not available:
-                return
-            cam_id = select_camera(available)
+            cam_id = probe_camera_by_identity(robot_config)
             if cam_id is None:
-                return
+                print("=" * 70)
+                print("[camera] Identity probe failed — falling back to interactive scan.")
+                print("[camera] Check 'camera_match_*' / 'camera_prefer_format' in")
+                print("         config/robot_config.yaml if this happens unexpectedly.")
+                print("=" * 70)
+                available = detect_available_cameras()
+                if not available:
+                    print("[camera] No cameras detected at all. Aborting.")
+                    return
+                cam_id = select_camera(available)
+                if cam_id is None:
+                    return
+            else:
+                print(f"[camera] Auto-selected /dev/video{cam_id} via identity probe.")
 
         cap = cv2.VideoCapture(cam_id)
         if not cap.isOpened():

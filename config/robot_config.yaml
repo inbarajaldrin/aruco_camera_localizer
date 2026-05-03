@@ -21,6 +21,16 @@ white_balance_mode: auto
 white_balance_temp: 4600.0   # used when white_balance_mode is 'manual'
 exposure: 166.0            # used when exposure_mode is 'manual'
 
+# Camera identity — used to auto-detect /dev/videoN by USB identity (survives reboots/replug).
+# Probe walks /sys/class/video4linux/, filters by name/VID/PID, then picks the stream
+# offering camera_prefer_format. Falls back to interactive scan if no match.
+# Override these on a per-machine basis if you swap to a different camera.
+camera_match_name: Intel(R) RealSense   # substring match against /sys/class/video4linux/*/name
+camera_match_vendor_id: '8086'          # USB vendor id, hex without 0x. 8086 = Intel. null = any.
+camera_match_product_id: null           # null = any RealSense model. e.g. '0ad3' = D435, '0b3a' = D435i
+camera_prefer_format: YUYV              # YUYV (RGB color) skips Z16 (depth) and GREY (IR) streams
+camera_serial: null                     # set if you have multiple identical cameras plugged in
+
 # ROS2 topics
 ee_pose_topic: /tcp_pose_broadcaster/pose
 

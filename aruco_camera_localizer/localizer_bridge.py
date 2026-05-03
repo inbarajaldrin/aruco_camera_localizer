@@ -4,7 +4,28 @@ from geometry_msgs.msg import PoseStamped, Pose, Vector3Stamped, PointStamped, P
 from std_msgs.msg import Header, ColorRGBA, Int32
 from sensor_msgs.msg import Image
 from tf2_msgs.msg import TFMessage
-from cv_bridge import CvBridge
+
+# ROS Humble's cv_bridge is compiled against NumPy 1.x. On systems with NumPy 2.x
+# it prints a noisy "compiled using NumPy 1.x ... _ARRAY_API not found" diagnostic
+# at import time. Functionality degrades to pure-Python paths but works. We silence
+# the import-time noise here so it doesn't masquerade as a real failure in logs.
+def _import_cv_bridge_quietly():
+    import os
+    import warnings
+    saved_stderr_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, 2)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r".*NumPy 1\.x.*")
+            from cv_bridge import CvBridge as _CvBridge
+        return _CvBridge
+    finally:
+        os.dup2(saved_stderr_fd, 2)
+        os.close(devnull_fd)
+        os.close(saved_stderr_fd)
+
+CvBridge = _import_cv_bridge_quietly()
 from max_camera_msgs.msg import PusherInfo
 import numpy as np
 from scipy.spatial.transform import Rotation as R

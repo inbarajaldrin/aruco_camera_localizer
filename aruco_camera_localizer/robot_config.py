@@ -34,6 +34,12 @@ class RobotConfig:
         'exposure': -7.0,
         'ee_pose_topic': '/tcp_pose_broadcaster/pose',
         'table_z': -0.0825,
+        # Camera identity (used to probe /dev/videoN by USB identity, not device number)
+        'camera_match_name': 'Intel(R) RealSense',  # substring match against /sys/class/video4linux/*/name
+        'camera_match_vendor_id': '8086',           # USB vendor id (lowercase hex, no 0x); null = any
+        'camera_match_product_id': None,            # USB product id; null = any
+        'camera_prefer_format': 'YUYV',             # pick stream offering this V4L2 fourcc (YUYV/MJPG/...) — skips depth/IR
+        'camera_serial': None,                      # disambiguate when multiple identical cams are connected
     }
 
     def __init__(self, config_path=None):
